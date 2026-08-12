@@ -1,0 +1,25 @@
+
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NaverPropertyRanking", "src\NaverPropertyRanking\NaverPropertyRanking.csproj", "{6BB8F56F-5AA8-4D23-9BDB-9F77E907C5D7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NaverPropertyRanking.SmokeTests", "tests\NaverPropertyRanking.SmokeTests\NaverPropertyRanking.SmokeTests.csproj", "{13144A29-C39B-47F2-B737-DCD073C73E5E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6BB8F56F-5AA8-4D23-9BDB-9F77E907C5D7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6BB8F56F-5AA8-4D23-9BDB-9F77E907C5D7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6BB8F56F-5AA8-4D23-9BDB-9F77E907C5D7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6BB8F56F-5AA8-4D23-9BDB-9F77E907C5D7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{13144A29-C39B-47F2-B737-DCD073C73E5E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{13144A29-C39B-47F2-B737-DCD073C73E5E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{13144A29-C39B-47F2-B737-DCD073C73E5E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{13144A29-C39B-47F2-B737-DCD073C73E5E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

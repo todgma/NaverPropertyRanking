@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+.idea/
+.agents/
+.codex/
+artifacts/
+TestResults/
+*.user
+*.suo
+*.log
+*.zip
+client.bundle.js
+publish/
+src/NaverPropertyRanking/appsettings.json
