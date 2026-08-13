@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Text.RegularExpressions;
 using NaverPropertyRanking.Models;
 
@@ -7,12 +8,13 @@ namespace NaverPropertyRanking.Services;
 
 public sealed class NaverLandClient : IDisposable
 {
-    private static readonly TimeSpan MinimumRequestInterval = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan ListingRequestInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan RankingRequestInterval = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan DefaultRateLimitCooldown = TimeSpan.FromMinutes(30);
     private readonly HttpClient _httpClient;
     private readonly ApiConfiguration _apiConfiguration;
-    private readonly SemaphoreSlim _requestGate = new(1, 1);
-    private DateTime _lastRequestUtc = DateTime.MinValue;
+    private readonly RequestThrottle _listingThrottle = new();
+    private readonly RequestThrottle _rankingThrottle = new();
 
     public NaverLandClient(HttpMessageHandler? handler = null)
         : this(new ApiConfiguration(), handler)
@@ -33,9 +35,22 @@ public sealed class NaverLandClient : IDisposable
 
     public async Task<IReadOnlyList<Listing>> GetOwnListingsAsync(
         AppSettings settings,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<ListingLoadProgress>? progress = null)
     {
-        var listings = new Dictionary<string, Listing>();
+        var listings = new List<Listing>();
+        await foreach (var listing in StreamOwnListingsAsync(settings, cancellationToken, progress)
+                           .ConfigureAwait(false))
+            listings.Add(listing);
+        return listings;
+    }
+
+    public async IAsyncEnumerable<Listing> StreamOwnListingsAsync(
+        AppSettings settings,
+        [EnumeratorCancellation] CancellationToken cancellationToken,
+        IProgress<ListingLoadProgress>? progress = null)
+    {
+        var seenArticleNumbers = new HashSet<string>(StringComparer.Ordinal);
         var manualArticleNumbers = ParseManualArticleNumbers(settings.ManualArticleNumbers);
 
         // 매물번호가 입력되면 단체 전체 목록보다 우선한다. 불필요한 전체 목록 호출을
@@ -44,27 +59,39 @@ public sealed class NaverLandClient : IDisposable
         {
             foreach (var articleNo in manualArticleNumbers)
             {
-                listings[articleNo] = new Listing(
+                yield return new Listing(
                     articleNo, "매물번호 직접 조회", string.Empty, string.Empty,
                     string.Empty, settings.GroupId, string.Empty, string.Empty, string.Empty, string.Empty, true);
             }
-            return listings.Values.ToList();
+            yield break;
         }
 
         if (!string.IsNullOrWhiteSpace(settings.GroupId))
         {
-            for (var page = 1; page <= 1000; page++)
+            const int maximumListingPages = 100;
+            for (var page = 1; page <= maximumListingPages; page++)
             {
                 var path = BuildArticleListPath(settings.GroupId.Trim(), page);
-                var json = await GetStringAsync(path, _apiConfiguration.RealtorArticleList, settings, cancellationToken);
+                var json = await GetStringAsync(
+                        path,
+                        _apiConfiguration.RealtorArticleList,
+                        settings,
+                        _listingThrottle,
+                        ListingRequestInterval,
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 var parsed = NaverResponseParser.ParseArticleResponse(json);
-                foreach (var listing in parsed.Listings) listings[listing.ArticleNo] = listing with { IsMine = true };
-                if (parsed.Listings.Count == 0 || parsed.IsMoreData == false) break;
-                // 실제 HTTP 호출 간격은 GetStringAsync의 전역 요청 게이트에서 보장한다.
+                var addedCount = 0;
+                foreach (var listing in parsed.Listings)
+                {
+                    if (!seenArticleNumbers.Add(listing.ArticleNo)) continue;
+                    addedCount++;
+                    yield return listing with { IsMine = true };
+                }
+                progress?.Report(new ListingLoadProgress(page, seenArticleNumbers.Count));
+                if (parsed.Listings.Count == 0 || parsed.IsMoreData == false || addedCount == 0) break;
             }
         }
-
-        return listings.Values.ToList();
     }
 
     public async Task<RankingResult> GetRankingAsync(
@@ -79,7 +106,14 @@ public sealed class NaverLandClient : IDisposable
             {
                 ["representativeArticleNo"] = ownListing.ArticleNo
             });
-            var json = await GetStringAsync(path, _apiConfiguration.Ranking, settings, cancellationToken);
+            var json = await GetStringAsync(
+                    path,
+                    _apiConfiguration.Ranking,
+                    settings,
+                    _rankingThrottle,
+                    RankingRequestInterval,
+                    cancellationToken)
+                .ConfigureAwait(false);
             var parsed = NaverResponseParser.ParseArticleResponse(json, ownArticleNumbers);
             var prices = NaverResponseParser.ParseSameAddressPrices(json);
             var rank = parsed.Listings
@@ -109,6 +143,8 @@ public sealed class NaverLandClient : IDisposable
         string path,
         ApiEndpointConfiguration endpointConfiguration,
         AppSettings settings,
+        RequestThrottle throttle,
+        TimeSpan minimumRequestInterval,
         CancellationToken cancellationToken)
     {
         if (settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow)
@@ -116,14 +152,15 @@ public sealed class NaverLandClient : IDisposable
             throw CreateCooldownException(blockedUntil, settings.RateLimitCooldownSource);
         }
 
-        await _requestGate.WaitAsync(cancellationToken);
+        await throttle.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (settings.RateLimitBlockedUntilUtc is { } gateBlockedUntil && gateBlockedUntil > DateTime.UtcNow)
                 throw CreateCooldownException(gateBlockedUntil, settings.RateLimitCooldownSource);
 
-            var remainingDelay = MinimumRequestInterval - (DateTime.UtcNow - _lastRequestUtc);
-            if (remainingDelay > TimeSpan.Zero) await Task.Delay(remainingDelay, cancellationToken);
+            var remainingDelay = minimumRequestInterval - (DateTime.UtcNow - throttle.LastRequestUtc);
+            if (remainingDelay > TimeSpan.Zero)
+                await Task.Delay(remainingDelay, cancellationToken).ConfigureAwait(false);
 
         var baseUrl = _apiConfiguration.BaseUrl.TrimEnd('/');
         using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + path);
@@ -132,8 +169,12 @@ public sealed class NaverLandClient : IDisposable
         HttpResponseMessage response;
         try
         {
-            _lastRequestUtc = DateTime.UtcNow;
-            response = await _httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            throttle.LastRequestUtc = DateTime.UtcNow;
+            response = await _httpClient.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -146,11 +187,9 @@ public sealed class NaverLandClient : IDisposable
 
         using (response)
         {
-            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             if (response.IsSuccessStatusCode)
             {
-                settings.RateLimitBlockedUntilUtc = null;
-                settings.RateLimitCooldownSource = string.Empty;
                 return body;
             }
 
@@ -173,7 +212,7 @@ public sealed class NaverLandClient : IDisposable
         }
         finally
         {
-            _requestGate.Release();
+            throttle.Gate.Release();
         }
     }
 
@@ -271,7 +310,18 @@ public sealed class NaverLandClient : IDisposable
 
     public void Dispose()
     {
-        _requestGate.Dispose();
+        _listingThrottle.Dispose();
+        _rankingThrottle.Dispose();
         _httpClient.Dispose();
     }
+
+    private sealed class RequestThrottle : IDisposable
+    {
+        public SemaphoreSlim Gate { get; } = new(1, 1);
+        public DateTime LastRequestUtc { get; set; } = DateTime.MinValue;
+
+        public void Dispose() => Gate.Dispose();
+    }
 }
+
+public sealed record ListingLoadProgress(int Page, int ListingCount);

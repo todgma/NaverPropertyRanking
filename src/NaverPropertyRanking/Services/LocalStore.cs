@@ -14,14 +14,18 @@ public sealed class LocalStore
     private readonly string _directory;
     private readonly string _settingsPath;
     private readonly string _snapshotsPath;
+    private readonly string _listingCachePath;
 
-    public LocalStore(string? directory = null)
+    public LocalStore(string? directory = null, string? listingCacheDirectory = null)
     {
         _directory = directory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "NaverPropertyRanking");
         _settingsPath = Path.Combine(_directory, "settings.json");
         _snapshotsPath = Path.Combine(_directory, "snapshots.json");
+        var cacheDirectory = listingCacheDirectory ??
+                             (directory is null ? AppContext.BaseDirectory : directory);
+        _listingCachePath = Path.Combine(cacheDirectory, "listing-cache.inf");
     }
 
     public AppSettings LoadSettings()
@@ -34,6 +38,7 @@ public sealed class LocalStore
             settings.BearerToken = DataProtection.Unprotect(settings.EncryptedBearerToken);
             settings.CookieHeader = DataProtection.Unprotect(settings.EncryptedCookieHeader);
             settings.LoginToken = DataProtection.Unprotect(settings.EncryptedLoginToken);
+            settings.Notices ??= [];
             return settings;
         }
         catch
@@ -79,5 +84,52 @@ public sealed class LocalStore
     {
         Directory.CreateDirectory(_directory);
         File.WriteAllText(_snapshotsPath, JsonSerializer.Serialize(snapshots, JsonOptions));
+    }
+
+    public ListingCacheEntry? LoadListingCache(string loginId, string groupId)
+    {
+        if (string.IsNullOrWhiteSpace(loginId) || string.IsNullOrWhiteSpace(groupId)) return null;
+        return LoadListingCaches().FirstOrDefault(entry =>
+            string.Equals(entry.LoginId, loginId.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(entry.GroupId, groupId.Trim(), StringComparison.OrdinalIgnoreCase));
+    }
+
+    public void SaveListingCache(ListingCacheEntry entry)
+    {
+        if (string.IsNullOrWhiteSpace(entry.LoginId) || string.IsNullOrWhiteSpace(entry.GroupId)) return;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(_listingCachePath)!);
+        var entries = LoadListingCaches();
+        entries.RemoveAll(existing =>
+            string.Equals(existing.LoginId, entry.LoginId.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(existing.GroupId, entry.GroupId.Trim(), StringComparison.OrdinalIgnoreCase));
+        entries.Add(entry with
+        {
+            LoginId = entry.LoginId.Trim(),
+            GroupId = entry.GroupId.Trim(),
+            Listings = entry.Listings.ToList(),
+            RankingResults = entry.RankingResults.ToList()
+        });
+
+        var temporaryPath = _listingCachePath + ".tmp";
+        var json = JsonSerializer.Serialize(entries, JsonOptions);
+        File.WriteAllText(temporaryPath, DataProtection.Protect(json));
+        File.Move(temporaryPath, _listingCachePath, true);
+    }
+
+    private List<ListingCacheEntry> LoadListingCaches()
+    {
+        try
+        {
+            if (!File.Exists(_listingCachePath)) return [];
+            var json = DataProtection.Unprotect(File.ReadAllText(_listingCachePath));
+            if (string.IsNullOrWhiteSpace(json)) return [];
+            return JsonSerializer.Deserialize<List<ListingCacheEntry>>(
+                       json, JsonOptions) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
     }
 }

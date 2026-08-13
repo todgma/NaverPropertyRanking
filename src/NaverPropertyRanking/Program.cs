@@ -20,7 +20,7 @@ internal static class Program
             if (!isFirstInstance)
             {
                 MessageBox.Show(
-                    "Naver 매물 랭킹 모니터가 이미 실행 중입니다.\n시스템 트레이를 확인해 주세요.",
+                    "네이버 매물 순위가 이미 실행 중입니다.\n시스템 트레이를 확인해 주세요.",
                     "이미 실행 중",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -34,6 +34,7 @@ internal static class Program
             GoogleAuthenticationClient? authenticationClient = null;
             try
             {
+                if (CheckForUpdates(applicationConfiguration.Update)) return;
                 if (applicationConfiguration.GoogleAuthentication.Enabled)
                 {
                     authenticationClient = new GoogleAuthenticationClient(
@@ -44,9 +45,9 @@ internal static class Program
                     authenticationSession = loginForm.Session;
                     settings.LastLoginId = authenticationSession.UserId;
                     settings.LoginToken = authenticationSession.Token;
+                    settings.Notices = authenticationSession.Notices.ToList();
                     store.SaveSettings(settings);
                 }
-                CheckForUpdates(applicationConfiguration.Update);
                 var credentialFingerprint = NaverAuthValidator.GetFingerprint(applicationConfiguration.Api);
                 if (NaverAuthValidator.GetError(applicationConfiguration.Api) is null
                     && !string.Equals(settings.CredentialFingerprint, credentialFingerprint, StringComparison.Ordinal))
@@ -85,27 +86,47 @@ internal static class Program
         }
     }
 
-    private static void CheckForUpdates(UpdateConfiguration configuration)
+    private static bool CheckForUpdates(UpdateConfiguration configuration)
     {
-        if (!configuration.Enabled || !configuration.CheckOnStartup) return;
+        if (!configuration.Enabled || !configuration.CheckOnStartup) return false;
         using var updateService = new GitHubUpdateService(configuration);
         var result = updateService.CheckAsync(CancellationToken.None).GetAwaiter().GetResult();
-        if (!result.UpdateAvailable || string.IsNullOrWhiteSpace(result.DownloadUrl)) return;
+        if (!result.UpdateAvailable) return false;
+        if (string.IsNullOrWhiteSpace(result.DownloadUrl))
+        {
+            MessageBox.Show(
+                result.Message,
+                "업데이트 파일 없음",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return false;
+        }
 
         var choice = MessageBox.Show(
-            $"새 버전 {result.LatestVersion}이 있습니다.\n현재 버전: {result.CurrentVersion}\n\n다운로드 페이지를 여시겠습니까?",
+            $"새 버전 {result.LatestVersion}이 있습니다.\n현재 버전: {result.CurrentVersion}\n\n" +
+            "새 실행 파일을 다운로드한 후 프로그램을 종료하고 자동으로 교체하시겠습니까?",
             "업데이트 알림",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Information);
-        if (choice != DialogResult.Yes) return;
+        if (choice != DialogResult.Yes) return false;
         try
         {
-            Process.Start(new ProcessStartInfo(result.DownloadUrl) { UseShellExecute = true });
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+            var downloadedPath = updateService.DownloadUpdateAsync(result, timeout.Token)
+                .GetAwaiter().GetResult();
+            UpdateInstaller.Start(downloadedPath, result.LatestVersion);
+            MessageBox.Show(
+                "업데이트 파일 다운로드가 완료되었습니다.\n프로그램을 종료한 후 새 버전으로 교체하고 자동 재실행합니다.",
+                "업데이트 준비 완료",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return true;
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"다운로드 페이지를 열 수 없습니다: {ex.Message}", "업데이트 오류",
+            MessageBox.Show($"업데이트를 적용할 수 없습니다: {ex.Message}", "업데이트 오류",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
     }
 }

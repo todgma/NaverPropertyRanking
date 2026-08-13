@@ -12,7 +12,7 @@ public sealed class GoogleAuthenticationConfiguration
     public bool Enabled { get; set; }
     public string WebAppUrl { get; set; } = string.Empty;
     public string PublicIpEndpoint { get; set; } = "https://api.ipify.org";
-    public int RequestTimeoutSeconds { get; set; } = 20;
+    public int RequestTimeoutSeconds { get; set; } = 60;
     public int HeartbeatIntervalSeconds { get; set; } = 120;
 }
 
@@ -21,9 +21,11 @@ public sealed class UpdateConfiguration
     public bool Enabled { get; set; }
     public bool CheckOnStartup { get; set; } = true;
     public string CurrentVersion { get; set; } = "1.0.0";
+    public string ReleasesApiUrl { get; set; } = string.Empty;
     public string LatestReleaseApiUrl { get; set; } = string.Empty;
+    public string ReleaseTagPrefix { get; set; } = string.Empty;
     public string ReleasesPageUrl { get; set; } = string.Empty;
-    public string AssetName { get; set; } = "NaverPropertyRanking.zip";
+    public string AssetName { get; set; } = "NaverPropertyRanking.exe";
 }
 
 public sealed class ApiConfiguration

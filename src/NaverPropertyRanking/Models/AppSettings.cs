@@ -3,7 +3,7 @@ namespace NaverPropertyRanking.Models;
 public sealed class AppSettings
 {
     public string GroupId { get; set; } = string.Empty;
-    public bool SaveGroupId { get; set; }
+    public bool SaveGroupId { get; set; } = true;
     public int PollIntervalMinutes { get; set; } = 10;
     public bool StartMinimized { get; set; }
     public bool AutoRefresh { get; set; } = true;
@@ -25,6 +25,7 @@ public sealed class AppSettings
     public string CredentialFingerprint { get; set; } = string.Empty;
     public string LastLoginId { get; set; } = string.Empty;
     public string EncryptedLoginToken { get; set; } = string.Empty;
+    public List<string> Notices { get; set; } = [];
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string BearerToken { get; set; } = string.Empty;

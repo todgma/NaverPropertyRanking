@@ -17,22 +17,24 @@ public static class RankingNotificationFormatter
     {
         if (events.Count == 0) return "변동 내역이 없습니다.";
 
-        var groups = events
-            .GroupBy(item => item.Title)
-            .OrderBy(group => Array.IndexOf(PreferredOrder, group.Key) is var index && index >= 0
+        var orderedEvents = events
+            .OrderBy(item => Array.IndexOf(PreferredOrder, item.Title) is var index && index >= 0
                 ? index
                 : int.MaxValue)
-            .ThenBy(group => group.Key, StringComparer.CurrentCulture)
+            .ThenBy(item => item.Title, StringComparer.CurrentCulture)
+            .ThenBy(item => item.ArticleNo, StringComparer.Ordinal)
             .ToList();
         var builder = new StringBuilder();
-        foreach (var group in groups)
+        foreach (var item in orderedEvents)
         {
-            if (builder.Length > 0) builder.AppendLine();
-            builder.AppendLine($"[{group.Key}] {group.Count()}건");
-            foreach (var item in group)
-                builder.AppendLine($"• {item.Message}");
+            var listingName = FirstNotEmpty(item.ListingName, item.ArticleNo, "매물정보 없음");
+            var tradeSummary = FirstNotEmpty(item.TradeSummary, "거래정보 없음");
+            builder.AppendLine($"{listingName} | {tradeSummary} | [{item.Title}] {item.Message}");
         }
 
         return builder.ToString().TrimEnd();
     }
+
+    private static string FirstNotEmpty(params string[] values) =>
+        values.First(value => !string.IsNullOrWhiteSpace(value));
 }

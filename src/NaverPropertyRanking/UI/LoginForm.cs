@@ -28,7 +28,7 @@ public sealed partial class LoginForm : Form
     public LoginForm(GoogleAuthenticationClient client, string lastLoginId)
     {
         _client = client;
-        Text = "Naver 매물 랭킹 모니터 로그인";
+        Text = "네이버 매물 순위 로그인";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -49,6 +49,7 @@ public sealed partial class LoginForm : Form
             e.SuppressKeyPress = true;
             await LoginAsync();
         };
+        _client.StartWarmUp();
     }
 
     public AuthenticationSession? Session { get; private set; }
@@ -57,7 +58,7 @@ public sealed partial class LoginForm : Form
     {
         var title = new Label
         {
-            Text = "매물 랭킹 서비스",
+            Text = "네이버 매물 순위",
             Dock = DockStyle.Top,
             Height = 62,
             Padding = new Padding(18, 16, 18, 0),

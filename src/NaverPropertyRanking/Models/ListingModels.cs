@@ -14,6 +14,8 @@ public sealed record Listing(
     bool IsMine = false)
 {
     public string ComplexNo { get; init; } = string.Empty;
+    public string ArticleName { get; init; } = string.Empty;
+    public string Description { get; init; } = string.Empty;
 }
 
 public sealed record RankingResult(
@@ -35,4 +37,27 @@ public sealed record ListingSnapshot(
     int CompetitorCount,
     DateTime CheckedAtUtc);
 
-public sealed record NotificationEvent(string Title, string Message);
+public sealed record ListingCacheEntry(
+    string LoginId,
+    string GroupId,
+    DateTime SavedAtUtc,
+    List<Listing> Listings,
+    List<RankingResult> RankingResults);
+
+public enum NotificationHighlight
+{
+    Neutral,
+    RankUp,
+    RankDown,
+    Warning,
+    PriceChange,
+    NewDuplicate
+}
+
+public sealed record NotificationEvent(
+    string Title,
+    string Message,
+    string ArticleNo = "",
+    string ListingName = "",
+    string TradeSummary = "",
+    NotificationHighlight Highlight = NotificationHighlight.Neutral);

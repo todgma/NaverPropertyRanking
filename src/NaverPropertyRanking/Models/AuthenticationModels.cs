@@ -8,10 +8,12 @@ public sealed record AuthenticationSession(
     DateTime? MembershipStart,
     DateTime? MembershipEnd,
     int AllowedPcCount,
-    int CurrentPcCount);
+    int CurrentPcCount,
+    IReadOnlyList<string> Notices);
 
 public sealed record AuthenticationResult(
     bool Success,
     string Message,
     AuthenticationSession? Session = null,
-    string? Code = null);
+    string? Code = null,
+    IReadOnlyList<string>? Notices = null);

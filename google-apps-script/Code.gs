@@ -1,6 +1,8 @@
 const MEMBER_SHEET = '회원정보';
 const HISTORY_SHEET = '이력';
 const SESSION_SHEET = '접속현황';
+const NOTICE_SHEET = '공지사항';
+const MEMBER_GROUP_SHEET = '회원_단체';
 const MEMBER_HEADERS = [
   '아이디', '비밀번호해시', '솔트', '이름', '가입일시',
   '멤버십 시작일자', '멤버십 종료일자', '사용가능PC수'
@@ -10,7 +12,11 @@ const SESSION_HEADERS = [
   '세션ID', '토큰', '아이디', 'PC명', '로그인일시',
   '마지막신호일시', '종료일시', '상태'
 ];
-const HASH_ITERATIONS = 8000;
+const NOTICE_HEADERS = ['공지내용'];
+const MEMBER_GROUP_HEADERS = ['id', '단체id'];
+const LEGACY_HASH_ITERATIONS = 8000;
+const CURRENT_HASH_ITERATIONS = 500;
+const CURRENT_HASH_PREFIX = 'v2$';
 const DEFAULT_SIGNUP_MEMBERSHIP_DAYS = 8;
 
 function doPost(e) {
@@ -27,6 +33,7 @@ function doPost(e) {
     if (action === 'login') return json_(login_(request));
     if (action === 'heartbeat') return json_(heartbeat_(request));
     if (action === 'logout') return json_(logout_(request));
+    if (action === 'savemembergroup') return json_(saveMemberGroup_(request));
     return json_({ success: false, message: '지원하지 않는 요청입니다.' });
   } catch (error) {
     console.error(error && error.stack ? error.stack : error);
@@ -35,7 +42,16 @@ function doPost(e) {
 }
 
 function doGet() {
-  return json_({ success: true, message: 'NaverPropertyRanking 인증 서비스가 실행 중입니다.' });
+  try {
+    const sheets = ensureSheets_();
+    return json_({
+      success: true,
+      message: 'NaverPropertyRanking 인증 서비스가 실행 중입니다.',
+      noticeCount: getNotices_(sheets.notices).length
+    });
+  } catch (error) {
+    return json_({ success: false, message: '인증 서비스 초기화에 실패했습니다.' });
+  }
 }
 
 /**
@@ -112,13 +128,13 @@ function signUp_(request) {
     const membershipStart = startOfDay_(now);
     const membershipEnd = addDays_(membershipStart, membershipDays);
     const salt = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
-    const passwordHash = hashPassword_(password, salt);
+    const passwordHash = hashPasswordV2_(password, salt);
     sheets.members.appendRow([
       userId, passwordHash, salt, name, now, membershipStart, membershipEnd, allowedPcCount
     ]);
-    sheets.members
-      .getRange(sheets.members.getLastRow(), 5, 1, 3)
-      .setNumberFormat('yyyy-mm-dd hh:mm:ss');
+    const memberRow = sheets.members.getLastRow();
+    sheets.members.getRange(memberRow, 5).setNumberFormat('yyyy-mm-dd hh:mm:ss');
+    sheets.members.getRange(memberRow, 6, 1, 2).setNumberFormat('yyyy-mm-dd');
     return { success: true, message: '회원가입이 완료되었습니다.' };
   } finally {
     lock.releaseLock();
@@ -140,8 +156,14 @@ function login_(request) {
   try {
     const sheets = ensureSheets_();
     const member = findMember_(sheets.members, userId);
-    if (!member || !constantTimeEquals_(member.passwordHash, hashPassword_(password, member.salt))) {
+    const passwordVerification = member
+      ? verifyPassword_(password, member.salt, member.passwordHash)
+      : { valid: false, needsUpgrade: false };
+    if (!member || !passwordVerification.valid) {
       return { success: false, code: 'INVALID_CREDENTIALS', message: '아이디 또는 패스워드가 올바르지 않습니다.' };
+    }
+    if (passwordVerification.needsUpgrade) {
+      sheets.members.getRange(member.row, 2).setValue(hashPasswordV2_(password, member.salt));
     }
 
     const now = new Date();
@@ -169,6 +191,7 @@ function login_(request) {
     ]);
     activeTokens.add(token);
     sheets.history.appendRow([token, now, userId, ip || '확인불가']);
+    const notices = getNotices_(sheets.notices);
     return {
       success: true,
       code: 'LOGIN_SUCCESS',
@@ -180,7 +203,8 @@ function login_(request) {
       membershipStart: start.toISOString(),
       membershipEnd: end.toISOString(),
       allowedPcCount: member.allowedPcCount,
-      currentPcCount: activeTokens.size
+      currentPcCount: activeTokens.size,
+      notices: notices
     };
   } finally {
     lock.releaseLock();
@@ -230,7 +254,8 @@ function heartbeat_(request) {
       message: '접속 상태가 갱신되었습니다.',
       allowedPcCount: member.allowedPcCount,
       currentPcCount: activeTokens.size,
-      membershipEnd: end.toISOString()
+      membershipEnd: end.toISOString(),
+      notices: getNotices_(sheets.notices)
     };
   } finally {
     lock.releaseLock();
@@ -259,19 +284,97 @@ function logout_(request) {
   }
 }
 
+function saveMemberGroup_(request) {
+  const sessionId = String(request.sessionId || '').trim();
+  const token = String(request.token || '').trim();
+  const groupId = String(request.groupId || '').trim();
+  if (!sessionId || !token) {
+    return { success: false, code: 'INVALID_SESSION', message: '세션 정보가 없습니다.' };
+  }
+  if (!groupId || groupId.length > 200 || /[\u0000-\u001F\u007F]/.test(groupId) || /^[=+\-@]/.test(groupId)) {
+    return { success: false, code: 'INVALID_GROUP_ID', message: '단체 ID 형식을 확인하세요.' };
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const sheets = ensureSheets_();
+    const now = new Date();
+    expireStaleSessions_(sheets.sessions, now);
+    const session = findSession_(sheets.sessions, sessionId);
+    if (!session || session.token !== token || session.status !== 'ACTIVE') {
+      return { success: false, code: 'SESSION_EXPIRED', message: '로그인 세션이 만료되었습니다. 다시 로그인하세요.' };
+    }
+    if (findMemberGroup_(sheets.memberGroups, session.userId, groupId)) {
+      return { success: true, code: 'MEMBER_GROUP_EXISTS', message: '이미 등록된 단체 ID입니다.' };
+    }
+
+    const nextRow = sheets.memberGroups.getLastRow() + 1;
+    sheets.memberGroups
+      .getRange(nextRow, 1, 1, MEMBER_GROUP_HEADERS.length)
+      .setNumberFormat('@')
+      .setValues([[session.userId, groupId]]);
+    return { success: true, code: 'MEMBER_GROUP_ADDED', message: '조회한 단체 ID를 저장했습니다.' };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function ensureSheets_() {
   const spreadsheetId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
   if (!spreadsheetId) throw new Error('SPREADSHEET_ID Script Property가 없습니다. configure를 실행하세요.');
   const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-  const members = ensureSheet_(spreadsheet, MEMBER_SHEET, MEMBER_HEADERS);
-  const history = ensureSheet_(spreadsheet, HISTORY_SHEET, HISTORY_HEADERS);
-  const sessions = ensureSheet_(spreadsheet, SESSION_SHEET, SESSION_HEADERS);
-  return { members: members, history: history, sessions: sessions };
+  const allSheets = spreadsheet.getSheets();
+  const sheetsByName = new Map(allSheets.map(sheet => [sheet.getName(), sheet]));
+  const members = ensureSheet_(spreadsheet, sheetsByName, MEMBER_SHEET, MEMBER_HEADERS);
+  const history = ensureSheet_(spreadsheet, sheetsByName, HISTORY_SHEET, HISTORY_HEADERS);
+  const sessions = ensureSheet_(spreadsheet, sheetsByName, SESSION_SHEET, SESSION_HEADERS);
+  const memberGroups = ensureSheet_(spreadsheet, sheetsByName, MEMBER_GROUP_SHEET, MEMBER_GROUP_HEADERS);
+  let notices = allSheets.filter(sheet => normalizeSheetName_(sheet.getName()) === normalizeSheetName_(NOTICE_SHEET));
+  if (notices.length === 0) {
+    notices = [ensureSheet_(spreadsheet, sheetsByName, NOTICE_SHEET, NOTICE_HEADERS)];
+  }
+  return {
+    members: members,
+    history: history,
+    sessions: sessions,
+    notices: notices,
+    memberGroups: memberGroups
+  };
 }
 
-function ensureSheet_(spreadsheet, name, headers) {
-  let sheet = spreadsheet.getSheetByName(name);
-  if (!sheet) sheet = spreadsheet.insertSheet(name);
+function getNotices_(sheets) {
+  const result = [];
+  const seen = new Set();
+  const candidates = Array.isArray(sheets) ? sheets : [sheets];
+  candidates.forEach(sheet => {
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return;
+    sheet
+      .getRange(2, 1, lastRow - 1, 1)
+      .getDisplayValues()
+      .map(row => String(row[0] || '').trim())
+      .filter(value => value.length > 0)
+      .forEach(value => {
+        const notice = value.substring(0, 500);
+        if (seen.has(notice) || result.length >= 100) return;
+        seen.add(notice);
+        result.push(notice);
+      });
+  });
+  return result;
+}
+
+function normalizeSheetName_(value) {
+  return String(value || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').toLowerCase();
+}
+
+function ensureSheet_(spreadsheet, sheetsByName, name, headers) {
+  let sheet = sheetsByName.get(name);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(name);
+    sheetsByName.set(name, sheet);
+  }
   if (sheet.getLastRow() === 0) {
     sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
     sheet.setFrozenRows(1);
@@ -318,6 +421,18 @@ function findSession_(sheet, sessionId) {
     };
   }
   return null;
+}
+
+function findMemberGroup_(sheet, userId, groupId) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return false;
+  const normalizedUserId = userId.toLowerCase();
+  const normalizedGroupId = groupId.toLowerCase();
+  const rows = sheet.getRange(2, 1, lastRow - 1, MEMBER_GROUP_HEADERS.length).getDisplayValues();
+  return rows.some(row =>
+    String(row[0]).trim().toLowerCase() === normalizedUserId &&
+    String(row[1]).trim().toLowerCase() === normalizedGroupId
+  );
 }
 
 function getActiveSessions_(sheet, userId) {
@@ -385,9 +500,9 @@ function createDeviceToken_(userId, deviceId) {
   return Utilities.base64EncodeWebSafe(signature).replace(/=+$/, '');
 }
 
-function hashPassword_(password, salt) {
+function hashPasswordIterations_(password, salt, iterations) {
   let value = `${salt}:${password}`;
-  for (let index = 0; index < HASH_ITERATIONS; index++) {
+  for (let index = 0; index < iterations; index++) {
     const digest = Utilities.computeDigest(
       Utilities.DigestAlgorithm.SHA_256,
       value,
@@ -396,6 +511,23 @@ function hashPassword_(password, salt) {
     value = Utilities.base64EncodeWebSafe(digest);
   }
   return value;
+}
+
+function hashPasswordV2_(password, salt) {
+  return CURRENT_HASH_PREFIX + hashPasswordIterations_(password, salt, CURRENT_HASH_ITERATIONS);
+}
+
+function verifyPassword_(password, salt, storedHash) {
+  if (storedHash.indexOf(CURRENT_HASH_PREFIX) === 0) {
+    return {
+      valid: constantTimeEquals_(storedHash, hashPasswordV2_(password, salt)),
+      needsUpgrade: false
+    };
+  }
+  return {
+    valid: constantTimeEquals_(storedHash, hashPasswordIterations_(password, salt, LEGACY_HASH_ITERATIONS)),
+    needsUpgrade: true
+  };
 }
 
 function constantTimeEquals_(left, right) {
@@ -439,7 +571,11 @@ function addDays_(date, days) {
 }
 
 function isMembershipActive_(now, start, end) {
-  return Boolean(start && end && now >= start && now < end);
+  if (!start || !end) return false;
+  const today = startOfDay_(now);
+  const startDate = startOfDay_(start);
+  const endDate = startOfDay_(end);
+  return today >= startDate && today < endDate;
 }
 
 function json_(value) {

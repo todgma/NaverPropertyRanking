@@ -17,15 +17,18 @@ public static class RankingAnalyzer
         if (previous is null || !current.Success) return (snapshot, []);
 
         var events = new List<NotificationEvent>();
-        var label = string.IsNullOrWhiteSpace(current.OwnListing.Address)
-            ? current.OwnListing.ArticleNo
-            : current.OwnListing.Address;
+        var listingName = BuildListingName(current.OwnListing);
+        var tradeSummary = JoinDistinct(" ", current.OwnListing.TradeType, current.OwnListing.Price);
 
         if (settings.NotifyEveryRankChange && previous.Rank != current.Rank)
         {
             events.Add(new NotificationEvent(
                 "매물 랭킹 변경",
-                $"{label}: {FormatRank(previous.Rank)} → {FormatRank(current.Rank)}"));
+                $"{FormatRank(previous.Rank)} → {FormatRank(current.Rank)}",
+                current.OwnListing.ArticleNo,
+                listingName,
+                tradeSummary,
+                GetRankHighlight(previous.Rank, current.Rank)));
         }
 
         var crossedThreshold = current.Rank is not null
@@ -35,7 +38,11 @@ public static class RankingAnalyzer
         {
             events.Add(new NotificationEvent(
                 "랭킹 기준 알림",
-                $"{label}: 현재 {current.Rank}위로 설정 기준({settings.RankThreshold}위 이상 숫자)에 도달했습니다."));
+                $"현재 {current.Rank}위 · 설정 기준 {settings.RankThreshold}위 도달",
+                current.OwnListing.ArticleNo,
+                listingName,
+                tradeSummary,
+                NotificationHighlight.Warning));
         }
 
         if (settings.NotifyCompetitorPriceChange)
@@ -46,7 +53,11 @@ public static class RankingAnalyzer
                 if (string.Equals(oldPrice, competitor.Price, StringComparison.Ordinal)) continue;
                 events.Add(new NotificationEvent(
                     "동일매물 가격 변경",
-                    $"{competitor.RealtorName} ({competitor.ArticleNo}): {oldPrice} → {competitor.Price}"));
+                    $"{competitor.RealtorName} ({competitor.ArticleNo}) 가격 {oldPrice} → {competitor.Price}",
+                    current.OwnListing.ArticleNo,
+                    listingName,
+                    tradeSummary,
+                    NotificationHighlight.PriceChange));
             }
         }
 
@@ -54,11 +65,36 @@ public static class RankingAnalyzer
         {
             events.Add(new NotificationEvent(
                 "단독매물 상태 변경",
-                $"{label}: 동일매물이 {competitors.Count}건 새로 확인되었습니다."));
+                $"동일매물 {competitors.Count}건 신규 확인",
+                current.OwnListing.ArticleNo,
+                listingName,
+                tradeSummary,
+                NotificationHighlight.NewDuplicate));
         }
 
         return (snapshot, events);
     }
 
     private static string FormatRank(int? rank) => rank is null ? "순위 없음" : $"{rank}위";
+
+    private static NotificationHighlight GetRankHighlight(int? previousRank, int? currentRank)
+    {
+        if (previousRank is null || currentRank is null) return NotificationHighlight.Neutral;
+        return currentRank < previousRank
+            ? NotificationHighlight.RankUp
+            : NotificationHighlight.RankDown;
+    }
+
+    private static string BuildListingName(Listing listing)
+    {
+        var name = JoinDistinct(" ", listing.ArticleName, listing.BuildingName);
+        if (!string.IsNullOrWhiteSpace(name)) return name;
+        if (!string.IsNullOrWhiteSpace(listing.Address)) return listing.Address;
+        return listing.ArticleNo;
+    }
+
+    private static string JoinDistinct(string separator, params string[] values) =>
+        string.Join(separator, values
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal));
 }

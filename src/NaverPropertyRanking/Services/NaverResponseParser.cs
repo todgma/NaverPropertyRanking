@@ -67,31 +67,54 @@ public static class NaverResponseParser
 
     private static Listing ParseListing(JsonElement item, ISet<string>? ownArticleNumbers)
     {
-        var articleNo = GetText(item, "articleNo", "articleNumber", "id") ?? string.Empty;
-        var articleName = GetText(item, "articleName", "complexName", "address") ?? string.Empty;
-        var buildingName = GetText(item, "buildingName", "building", "dongName") ?? string.Empty;
-        var roadAddress = GetText(item, "roadAddress", "roadAddressName") ?? string.Empty;
-        var address = JoinDistinct(" ", roadAddress, articleName, buildingName);
+        var articleNo = GetText(item, "articleNo", "articleNumber", "atclNo", "id") ?? string.Empty;
+        var articleName = GetText(item, "articleName", "complexName", "atclNm") ?? string.Empty;
+        var realEstateType = GetText(item, "realEstateTypeName", "rletTpNm") ?? string.Empty;
+        var buildingName = GetText(item, "buildingName", "building", "dongName", "bildNm") ?? string.Empty;
+        var location = GetText(
+            item,
+            "exposeAddress",
+            "cortarAddress",
+            "cortarAddr",
+            "roadAddress",
+            "roadAddressName",
+            "address",
+            "location") ?? string.Empty;
+        var registeredName = GetText(
+            item,
+            "articleFeatureDesc",
+            "atclFetrDesc",
+            "articleTitle",
+            "articleSubject",
+            "listingName",
+            "articleDescription",
+            "description") ?? string.Empty;
+        var floorInfo = GetText(item, "floorInfo", "flrInfo", "flrNm") ?? string.Empty;
+        var displayName = string.IsNullOrWhiteSpace(articleName) ? realEstateType : articleName;
+        var floorDisplay = string.IsNullOrWhiteSpace(floorInfo) ? string.Empty : $"{floorInfo}층";
+        var address = JoinDistinct(" · ", location, displayName, buildingName, registeredName, floorDisplay);
 
-        var dealPrice = GetText(item, "dealOrWarrantPrc", "price", "priceText") ?? string.Empty;
+        var dealPrice = GetText(item, "dealOrWarrantPrc", "dealOrWrterPrc", "price", "priceText", "prcInfo") ?? string.Empty;
         var rentPrice = GetText(item, "rentPrc", "monthlyRent") ?? string.Empty;
         var price = string.IsNullOrWhiteSpace(rentPrice) ? dealPrice : $"{dealPrice}/{rentPrice}";
-        var area = GetText(item, "areaName", "area2", "exclusiveArea") ?? string.Empty;
+        var area = GetText(item, "areaName", "area2", "exclusiveArea", "spc2") ?? string.Empty;
 
         return new Listing(
             articleNo,
             address,
-            GetText(item, "tradeTypeName", "tradeType", "tradeTypeCode") ?? string.Empty,
+            GetText(item, "tradeTypeName", "tradeType", "tradeTypeCode", "tradTpNm") ?? string.Empty,
             price,
-            GetText(item, "realtorName", "brokerName") ?? string.Empty,
+            GetText(item, "realtorName", "brokerName", "rltrNm") ?? string.Empty,
             GetText(item, "realtorId", "brokerId") ?? string.Empty,
             GetText(item, "cpName", "providerName") ?? string.Empty,
             buildingName,
-            GetText(item, "floorInfo") ?? string.Empty,
+            floorInfo,
             area,
             ownArticleNumbers?.Contains(articleNo) == true)
         {
-            ComplexNo = GetText(item, "complexNo", "complexNumber") ?? string.Empty
+            ComplexNo = GetText(item, "complexNo", "complexNumber") ?? string.Empty,
+            ArticleName = articleName,
+            Description = registeredName
         };
     }
 
@@ -104,7 +127,7 @@ public static class NaverResponseParser
         foreach (var name in names)
         {
             if (!TryGetPropertyIgnoreCase(element, name, out var value)) continue;
-            return value.ValueKind switch
+            var text = value.ValueKind switch
             {
                 JsonValueKind.String => value.GetString(),
                 JsonValueKind.Number => value.GetRawText(),
@@ -112,6 +135,7 @@ public static class NaverResponseParser
                 JsonValueKind.False => "false",
                 _ => null
             };
+            if (!string.IsNullOrWhiteSpace(text)) return text;
         }
         return null;
     }

@@ -13,6 +13,8 @@ public sealed class GoogleAuthenticationClient : IDisposable
 
     private readonly GoogleAuthenticationConfiguration _configuration;
     private readonly HttpClient _httpClient;
+    private Task<string>? _publicIpTask;
+    private Task? _serverWarmUpTask;
 
     public GoogleAuthenticationClient(
         GoogleAuthenticationConfiguration configuration,
@@ -21,6 +23,12 @@ public sealed class GoogleAuthenticationClient : IDisposable
         _configuration = configuration;
         _httpClient = handler is null ? new HttpClient() : new HttpClient(handler);
         _httpClient.Timeout = TimeSpan.FromSeconds(Math.Clamp(configuration.RequestTimeoutSeconds, 5, 120));
+    }
+
+    public void StartWarmUp()
+    {
+        _publicIpTask ??= GetPublicIpAsync(CancellationToken.None);
+        _serverWarmUpTask ??= WarmUpServerAsync();
     }
 
     public async Task<AuthenticationResult> SignUpAsync(
@@ -39,7 +47,7 @@ public sealed class GoogleAuthenticationClient : IDisposable
             name = name.Trim(),
             deviceId = DeviceIdentity.GetStableId(),
             deviceName = Environment.MachineName,
-            ip = await GetPublicIpAsync(cancellationToken),
+            ip = await GetCachedPublicIpAsync(cancellationToken),
             appVersion = Application.ProductVersion
         };
         return await PostAsync(endpoint!, payload, "signup", userId, cancellationToken);
@@ -60,7 +68,7 @@ public sealed class GoogleAuthenticationClient : IDisposable
             name = string.Empty,
             deviceId = DeviceIdentity.GetStableId(),
             deviceName = Environment.MachineName,
-            ip = await GetPublicIpAsync(cancellationToken),
+            ip = await GetCachedPublicIpAsync(cancellationToken),
             appVersion = Application.ProductVersion
         };
         return await PostAsync(endpoint!, payload, "login", userId, cancellationToken);
@@ -76,10 +84,17 @@ public sealed class GoogleAuthenticationClient : IDisposable
         CancellationToken cancellationToken) =>
         SendSessionRequestAsync("logout", session, cancellationToken);
 
+    public Task<AuthenticationResult> SaveMemberGroupAsync(
+        AuthenticationSession session,
+        string groupId,
+        CancellationToken cancellationToken) =>
+        SendSessionRequestAsync("saveMemberGroup", session, cancellationToken, groupId.Trim());
+
     private async Task<AuthenticationResult> SendSessionRequestAsync(
         string action,
         AuthenticationSession session,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? groupId = null)
     {
         var endpointError = GetEndpoint(out var endpoint);
         if (endpointError is not null) return endpointError;
@@ -89,6 +104,7 @@ public sealed class GoogleAuthenticationClient : IDisposable
             sessionId = session.SessionId,
             token = session.Token,
             userId = session.UserId,
+            groupId,
             deviceId = DeviceIdentity.GetStableId(),
             appVersion = Application.ProductVersion
         };
@@ -136,8 +152,15 @@ public sealed class GoogleAuthenticationClient : IDisposable
                 return new AuthenticationResult(false, "로그인 서버 응답을 해석할 수 없습니다.", Code: "INVALID_RESPONSE");
             if (!apiResponse.Success)
                 return new AuthenticationResult(false, apiResponse.Message ?? "요청에 실패했습니다.", Code: apiResponse.Code);
+            var notices = apiResponse.Notices is null
+                ? new List<string> { "공지사항을 불러오지 못했습니다. Apps Script를 최신 Code.gs로 다시 배포하세요." }
+                : NormalizeNotices(apiResponse.Notices);
             if (!string.Equals(action, "login", StringComparison.OrdinalIgnoreCase))
-                return new AuthenticationResult(true, apiResponse.Message ?? "요청이 완료되었습니다.", Code: apiResponse.Code);
+                return new AuthenticationResult(
+                    true,
+                    apiResponse.Message ?? "요청이 완료되었습니다.",
+                    Code: apiResponse.Code,
+                    Notices: apiResponse.Notices is null ? null : notices);
 
             var session = new AuthenticationSession(
                 apiResponse.UserId ?? userId.Trim(),
@@ -147,7 +170,8 @@ public sealed class GoogleAuthenticationClient : IDisposable
                 ParseDate(apiResponse.MembershipStart),
                 ParseDate(apiResponse.MembershipEnd),
                 apiResponse.AllowedPcCount,
-                apiResponse.CurrentPcCount);
+                apiResponse.CurrentPcCount,
+                notices);
             if (string.IsNullOrWhiteSpace(session.Token) || string.IsNullOrWhiteSpace(session.SessionId))
                 return new AuthenticationResult(false, "로그인 서버가 세션 정보를 반환하지 않았습니다. Code.gs를 새 버전으로 배포하세요.",
                     Code: "MISSING_SESSION");
@@ -173,7 +197,9 @@ public sealed class GoogleAuthenticationClient : IDisposable
             return "확인불가";
         try
         {
-            var value = await _httpClient.GetStringAsync(endpoint, cancellationToken);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(2));
+            var value = await _httpClient.GetStringAsync(endpoint, timeout.Token);
             value = value.Trim();
             return value.Length is > 0 and <= 64 ? value : "확인불가";
         }
@@ -182,6 +208,33 @@ public sealed class GoogleAuthenticationClient : IDisposable
             return "확인불가";
         }
     }
+
+    private async Task<string> GetCachedPublicIpAsync(CancellationToken cancellationToken)
+    {
+        StartWarmUp();
+        var task = _publicIpTask!;
+        return await task.WaitAsync(cancellationToken);
+    }
+
+    private async Task WarmUpServerAsync()
+    {
+        if (GetEndpoint(out var endpoint) is not null || endpoint is null) return;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            using var response = await _httpClient.GetAsync(endpoint, timeout.Token);
+        }
+        catch
+        {
+            // 워밍업 실패는 실제 로그인 요청에서 다시 처리합니다.
+        }
+    }
+
+    private static List<string> NormalizeNotices(IEnumerable<string>? notices) =>
+        notices?
+            .Where(notice => !string.IsNullOrWhiteSpace(notice))
+            .Select(notice => notice.Trim())
+            .ToList() ?? [];
 
     private static DateTime? ParseDate(string? value) =>
         DateTime.TryParse(value, out var parsed) ? parsed : null;
@@ -201,5 +254,6 @@ public sealed class GoogleAuthenticationClient : IDisposable
         public string? MembershipEnd { get; set; }
         public int AllowedPcCount { get; set; }
         public int CurrentPcCount { get; set; }
+        public List<string>? Notices { get; set; }
     }
 }
