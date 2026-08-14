@@ -580,12 +580,6 @@ public sealed class MainForm : Form
                 .ToList();
             _hasLoadedListings = _ownListings.Count > 0;
 
-            var ownNumbers = _ownListings
-                .Select(listing => listing.ArticleNo)
-                .ToHashSet(StringComparer.Ordinal);
-            var allEvents = new List<NotificationEvent>();
-            var attemptedResults = new List<RankingResult>();
-
             if (_ownListings.Count == 0)
             {
                 SetLoadedListingIdentity(_settings.GroupId);
@@ -595,78 +589,30 @@ public sealed class MainForm : Form
                 return;
             }
 
-            // 사용자 매물 전체 목록을 먼저 표시한 뒤 각 행의 랭킹을 순서대로 조회한다.
+            // 사용자 매물 전체 목록을 먼저 표시한 뒤 랭킹은 최대 5건 병렬 조회한다.
             UpdateCurrentPageResults("랭킹 조회 대기");
             RenderGrid();
             SetStatus(ListingProgressFormatter.Format(0, _ownListings.Count));
             await Task.Yield();
-
-            var pendingArticleNumbers = _ownListings
-                .Select(listing => listing.ArticleNo)
-                .ToHashSet(StringComparer.Ordinal);
-            while (pendingArticleNumbers.Count > 0)
-            {
-                var listing = ListingSorter
-                    .Sort(_ownListings, _rankingCache, _listingSortOrder)
-                    .First(item => pendingArticleNumbers.Contains(item.ArticleNo));
-                var completedCount = _ownListings.Count - pendingArticleNumbers.Count;
-                SetStatus(ListingProgressFormatter.Format(completedCount, _ownListings.Count, listing.ArticleNo));
-
-                var previousRank = _snapshots.TryGetValue(listing.ArticleNo, out var savedSnapshot)
-                    ? savedSnapshot.Rank
-                    : null;
-                var result = (await _apiClient.GetRankingAsync(
-                    listing,
-                    ownNumbers,
-                    _settings,
-                    _lifetime.Token)) with { PreviousRank = previousRank };
-                attemptedResults.Add(result);
-                _rankingCache[listing.ArticleNo] = result;
-                pendingArticleNumbers.Remove(listing.ArticleNo);
-
-                UpdateCurrentPageResults("랭킹 조회 대기");
-                RenderGrid();
-                SetStatus(ListingProgressFormatter.Format(
-                    _ownListings.Count - pendingArticleNumbers.Count,
-                    _ownListings.Count,
-                    listing.ArticleNo));
-                await Task.Yield();
-                if (result.Error?.Contains("429", StringComparison.Ordinal) == true) break;
-            }
-
-            NormalizeLoadedRankingOwnership(ownNumbers);
-            foreach (var attemptedResult in attemptedResults.Where(result => result.Success))
-            {
-                var normalizedResult = _rankingCache[attemptedResult.OwnListing.ArticleNo];
-                _snapshots.TryGetValue(normalizedResult.OwnListing.ArticleNo, out var previous);
-                var comparison = RankingAnalyzer.Compare(normalizedResult, previous, _settings);
-                _snapshots[normalizedResult.OwnListing.ArticleNo] = comparison.Snapshot;
-                allEvents.AddRange(comparison.Events);
-            }
-            UpdateCurrentPageResults("랭킹 미조회");
-            RenderGrid();
-            _store.SaveSnapshots(_snapshots);
-            _store.SaveSettings(_settings);
             SetLoadedListingIdentity(_settings.GroupId);
-            SaveCurrentListingCache();
-            _lastChecked.Text = $"마지막 조회: {DateTime.Now:yyyy-MM-dd HH:mm:ss}";
-
-            var successes = attemptedResults.Count(result => result.Success);
-            var failures = attemptedResults.Count - successes;
-            if (failures == 0 && attemptedResults.Count == _ownListings.Count)
-            {
-                _lastCompletedRankingTargets.Clear();
-                foreach (var ownListing in _ownListings)
-                    _lastCompletedRankingTargets.Add(ownListing.ArticleNo);
-                _lastRankingCompletedUtc = DateTime.UtcNow;
-            }
-
             var scope = $"전체 {_ownListings.Count}건";
-            var progress = ListingProgressFormatter.Format(attemptedResults.Count, _ownListings.Count);
-            SetStatus(failures == 0 && attemptedResults.Count == _ownListings.Count
+            var rankingSummary = await RankListingsCoreAsync(
+                _ownListings,
+                true,
+                scope,
+                false);
+            SaveCurrentListingCache();
+            var progress = ListingProgressFormatter.Format(
+                rankingSummary.SuccessCount + rankingSummary.FailureCount,
+                _ownListings.Count);
+            SetStatus(rankingSummary.FailureCount == 0
                 ? $"완료 · {progress}"
-                : $"{progress} · 성공 {successes}건 / 실패 {failures}건");
-            ShowRankingCompletionPopup(scope, successes, failures, allEvents);
+                : $"{progress} · 성공 {rankingSummary.SuccessCount}건 / 실패 {rankingSummary.FailureCount}건");
+            ShowRankingCompletionPopup(
+                scope,
+                rankingSummary.SuccessCount,
+                rankingSummary.FailureCount,
+                rankingSummary.Events);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -851,42 +797,74 @@ public sealed class MainForm : Form
         var ownNumbers = _ownListings.Select(x => x.ArticleNo).ToHashSet();
         var allEvents = new List<NotificationEvent>();
         var attemptedResults = new List<RankingResult>();
-        var requestCount = targetListings.Count(listing => forceRefresh || !_rankingCache.ContainsKey(listing.ArticleNo));
-        var requestIndex = 0;
+        var pendingListings = new Queue<Listing>(ListingSorter
+            .Sort(targetListings, _rankingCache, _listingSortOrder)
+            .Where(listing => forceRefresh || !_rankingCache.ContainsKey(listing.ArticleNo)));
+        var requestCount = pendingListings.Count;
+        var completedCount = 0;
         UpdateCurrentPageResults("랭킹 조회 대기");
         RenderGrid();
         ConfigureBusyProgress(requestCount);
 
-        foreach (var listing in targetListings)
-        {
-            if (!forceRefresh && _rankingCache.ContainsKey(listing.ArticleNo)) continue;
-            requestIndex++;
-            ReportBusyProgress(requestIndex - 1, requestCount, $"{scope} 랭킹 조회 중\n{requestIndex}/{requestCount} · {listing.ArticleNo}");
-            SetStatus($"{scope} 랭킹 조회 중... {requestIndex}/{requestCount} ({listing.ArticleNo})");
-            int? previousRank = null;
-            if (_rankingCache.TryGetValue(listing.ArticleNo, out var cached) && cached.Success)
-                previousRank = cached.Rank;
-            else if (_snapshots.TryGetValue(listing.ArticleNo, out var savedSnapshot))
-                previousRank = savedSnapshot.Rank;
+        var runningRequests = new Dictionary<Task<RankingResult>, Listing>();
+        var previousRanks = new Dictionary<string, int?>(StringComparer.Ordinal);
+        var stopLaunching = false;
 
-            var result = (await _apiClient.GetRankingAsync(listing, ownNumbers, _settings, _lifetime.Token)) with
+        void LaunchAvailableRequests()
+        {
+            while (!stopLaunching && runningRequests.Count < 5 && pendingListings.Count > 0)
             {
-                PreviousRank = previousRank
-            };
-            attemptedResults.Add(result);
-            _rankingCache[listing.ArticleNo] = result;
-            ReportBusyProgress(requestIndex, requestCount, $"{scope} 랭킹 조회 중\n{requestIndex}/{requestCount} 완료");
+                var listing = pendingListings.Dequeue();
+                int? previousRank = null;
+                if (_rankingCache.TryGetValue(listing.ArticleNo, out var cached) && cached.Success)
+                    previousRank = cached.Rank;
+                else if (_snapshots.TryGetValue(listing.ArticleNo, out var savedSnapshot))
+                    previousRank = savedSnapshot.Rank;
+
+                previousRanks[listing.ArticleNo] = previousRank;
+                var request = _apiClient.GetRankingAsync(listing, ownNumbers, _settings, _lifetime.Token);
+                runningRequests.Add(request, listing);
+            }
+        }
+
+        LaunchAvailableRequests();
+        while (runningRequests.Count > 0)
+        {
+            await Task.WhenAny(runningRequests.Keys);
+            var completedTasks = runningRequests.Keys
+                .Where(task => task.IsCompleted)
+                .ToList();
+            string? lastCompletedArticleNo = null;
+
+            foreach (var completedTask in completedTasks)
+            {
+                var listing = runningRequests[completedTask];
+                runningRequests.Remove(completedTask);
+                completedCount++;
+                lastCompletedArticleNo = listing.ArticleNo;
+                var result = (await completedTask) with
+                {
+                    PreviousRank = previousRanks[listing.ArticleNo]
+                };
+                attemptedResults.Add(result);
+                _rankingCache[listing.ArticleNo] = result;
+
+                if (result.Success)
+                {
+                    _snapshots.TryGetValue(listing.ArticleNo, out var previous);
+                    var comparison = RankingAnalyzer.Compare(result, previous, _settings);
+                    _snapshots[listing.ArticleNo] = comparison.Snapshot;
+                    allEvents.AddRange(comparison.Events);
+                }
+                if (result.Error?.Contains("429", StringComparison.Ordinal) == true)
+                    stopLaunching = true;
+            }
+
+            ReportBusyProgress(completedCount, requestCount, $"{scope} 랭킹 조회 중\n{completedCount}/{requestCount} 완료");
+            SetStatus($"{scope} 랭킹 조회 중... {completedCount}/{requestCount} ({lastCompletedArticleNo})");
             UpdateCurrentPageResults("랭킹 조회 중");
             RenderGrid();
-
-            if (result.Success)
-            {
-                _snapshots.TryGetValue(listing.ArticleNo, out var previous);
-                var comparison = RankingAnalyzer.Compare(result, previous, _settings);
-                _snapshots[listing.ArticleNo] = comparison.Snapshot;
-                allEvents.AddRange(comparison.Events);
-            }
-            if (result.Error?.Contains("429", StringComparison.Ordinal) == true) break;
+            LaunchAvailableRequests();
         }
 
         UpdateCurrentPageResults("랭킹 미조회");
@@ -1200,12 +1178,17 @@ public sealed class MainForm : Form
         row.Tag = new GridRowTag(result, listing, false);
         row.DefaultCellStyle.Font = new Font(_grid.Font, FontStyle.Bold);
         row.DefaultCellStyle.BackColor = Color.FromArgb(244, 250, 247);
+        var currentRankCell = row.Cells["CurrentRank"];
+        currentRankCell.Style.BackColor = Color.FromArgb(255, 246, 194);
+        currentRankCell.Style.SelectionBackColor = Color.FromArgb(255, 232, 128);
+        currentRankCell.Style.ForeColor = Color.FromArgb(104, 82, 12);
+        currentRankCell.Style.SelectionForeColor = Color.FromArgb(78, 60, 0);
         var movement = RankPresentation.GetMovement(result.PreviousRank, result.Rank);
         if (movement != RankMovement.None)
         {
             var movementColor = movement == RankMovement.Up ? Color.Red : Color.Blue;
-            row.Cells["CurrentRank"].Style.ForeColor = movementColor;
-            row.Cells["CurrentRank"].Style.SelectionForeColor = movementColor;
+            currentRankCell.Style.ForeColor = movementColor;
+            currentRankCell.Style.SelectionForeColor = movementColor;
         }
         if (!result.Success) row.DefaultCellStyle.ForeColor = Color.Firebrick;
     }

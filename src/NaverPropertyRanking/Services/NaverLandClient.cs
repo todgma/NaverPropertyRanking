@@ -9,12 +9,13 @@ namespace NaverPropertyRanking.Services;
 public sealed class NaverLandClient : IDisposable
 {
     private static readonly TimeSpan ListingRequestInterval = TimeSpan.FromMilliseconds(200);
-    private static readonly TimeSpan RankingRequestInterval = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan RankingRequestInterval = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan DefaultRateLimitCooldown = TimeSpan.FromMinutes(30);
     private readonly HttpClient _httpClient;
     private readonly ApiConfiguration _apiConfiguration;
     private readonly RequestThrottle _listingThrottle = new();
     private readonly RequestThrottle _rankingThrottle = new();
+    private readonly SemaphoreSlim _rankingConcurrency = new(5, 5);
 
     public NaverLandClient(HttpMessageHandler? handler = null)
         : this(new ApiConfiguration(), handler)
@@ -100,6 +101,28 @@ public sealed class NaverLandClient : IDisposable
         AppSettings settings,
         CancellationToken cancellationToken)
     {
+        await _rankingConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await GetRankingCoreAsync(
+                    ownListing,
+                    ownArticleNumbers,
+                    settings,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            _rankingConcurrency.Release();
+        }
+    }
+
+    private async Task<RankingResult> GetRankingCoreAsync(
+        Listing ownListing,
+        ISet<string> ownArticleNumbers,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
         try
         {
             var path = BuildPath(_apiConfiguration.Ranking, new Dictionary<string, string>
@@ -152,6 +175,8 @@ public sealed class NaverLandClient : IDisposable
             throw CreateCooldownException(blockedUntil, settings.RateLimitCooldownSource);
         }
 
+        // 호출 시작 간격만 직렬 제어하고 응답 대기 중에는 다음 요청이 시작될 수 있게 한다.
+        // 랭킹 배치의 최대 동시 요청 수는 호출 측에서 제한한다.
         await throttle.Gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -162,6 +187,13 @@ public sealed class NaverLandClient : IDisposable
             if (remainingDelay > TimeSpan.Zero)
                 await Task.Delay(remainingDelay, cancellationToken).ConfigureAwait(false);
 
+            throttle.LastRequestUtc = DateTime.UtcNow;
+        }
+        finally
+        {
+            throttle.Gate.Release();
+        }
+
         var baseUrl = _apiConfiguration.BaseUrl.TrimEnd('/');
         using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + path);
         ApplyConfiguredHeaders(request, endpointConfiguration);
@@ -169,7 +201,6 @@ public sealed class NaverLandClient : IDisposable
         HttpResponseMessage response;
         try
         {
-            throttle.LastRequestUtc = DateTime.UtcNow;
             response = await _httpClient.SendAsync(
                     request,
                     HttpCompletionOption.ResponseHeadersRead,
@@ -208,11 +239,6 @@ public sealed class NaverLandClient : IDisposable
                 _ => $"네이버 API 오류: HTTP {(int)response.StatusCode}"
             };
             throw new NaverApiException(message, response.StatusCode);
-        }
-        }
-        finally
-        {
-            throttle.Gate.Release();
         }
     }
 
@@ -312,6 +338,7 @@ public sealed class NaverLandClient : IDisposable
     {
         _listingThrottle.Dispose();
         _rankingThrottle.Dispose();
+        _rankingConcurrency.Dispose();
         _httpClient.Dispose();
     }
 

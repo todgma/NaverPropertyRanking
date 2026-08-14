@@ -17,7 +17,7 @@ public static class RankingAnalyzer
         if (previous is null || !current.Success) return (snapshot, []);
 
         var events = new List<NotificationEvent>();
-        var listingName = BuildListingName(current.OwnListing);
+        var listingName = BuildListingInformation(current.OwnListing);
         var tradeSummary = JoinDistinct(" ", current.OwnListing.TradeType, current.OwnListing.Price);
 
         if (settings.NotifyEveryRankChange && previous.Rank != current.Rank)
@@ -85,11 +85,15 @@ public static class RankingAnalyzer
             : NotificationHighlight.RankDown;
     }
 
-    private static string BuildListingName(Listing listing)
+    private static string BuildListingInformation(Listing listing)
     {
-        var name = JoinDistinct(" ", listing.ArticleName, listing.BuildingName);
-        if (!string.IsNullOrWhiteSpace(name)) return name;
+        // The main list's "매물종류/설명" column displays Address. The parser
+        // composes it from location, property type/name, building, description,
+        // and floor information, so notifications must use the same value.
         if (!string.IsNullOrWhiteSpace(listing.Address)) return listing.Address;
+
+        var name = JoinDistinct(" · ", listing.ArticleName, listing.BuildingName, listing.Description);
+        if (!string.IsNullOrWhiteSpace(name)) return name;
         return listing.ArticleNo;
     }
 

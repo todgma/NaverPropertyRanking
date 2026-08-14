@@ -29,7 +29,7 @@ public sealed class RankingNotificationForm : Form
         MinimizeBox = false;
         ShowInTaskbar = false;
         TopMost = true;
-        ClientSize = new Size(650, 470);
+        ClientSize = new Size(1000, 560);
         Font = new Font("맑은 고딕", 9F);
         BackColor = Color.White;
 
@@ -134,35 +134,45 @@ public sealed class RankingNotificationForm : Form
     {
         var card = new TableLayoutPanel
         {
-            Height = 78,
-            Width = 570,
-            ColumnCount = 3,
+            Height = 86,
+            Width = 920,
+            ColumnCount = 4,
             RowCount = 1,
             Margin = new Padding(0, 0, 0, 8),
             Padding = new Padding(8),
             BackColor = Color.White,
             CellBorderStyle = TableLayoutPanelCellBorderStyle.Single
         };
-        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 24));
-        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 42));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 16));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 29));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
+        card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 35));
 
         var listingName = string.IsNullOrWhiteSpace(notificationEvent.ListingName)
             ? notificationEvent.ArticleNo
             : notificationEvent.ListingName;
-        var articleNumber = string.IsNullOrWhiteSpace(notificationEvent.ArticleNo)
-            ? string.Empty
-            : $"\r\n매물번호 {notificationEvent.ArticleNo}";
         card.Controls.Add(new Label
         {
-            Text = listingName + articleNumber,
+            Text = string.IsNullOrWhiteSpace(notificationEvent.ArticleNo)
+                ? "매물번호 없음"
+                : notificationEvent.ArticleNo,
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleCenter,
+            AutoEllipsis = true,
+            Padding = new Padding(5),
+            Font = new Font("맑은 고딕", 9.5F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(56, 76, 70)
+        }, 0, 0);
+        card.Controls.Add(new Label
+        {
+            Text = listingName,
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = true,
+            AutoEllipsis = false,
             Padding = new Padding(7, 3, 5, 3),
-            Font = new Font("맑은 고딕", 9.5F, FontStyle.Bold),
+            Font = new Font("맑은 고딕", 9F, FontStyle.Bold),
             ForeColor = Color.FromArgb(40, 40, 40)
-        }, 0, 0);
+        }, 1, 0);
         card.Controls.Add(new Label
         {
             Text = string.IsNullOrWhiteSpace(notificationEvent.TradeSummary)
@@ -173,7 +183,7 @@ public sealed class RankingNotificationForm : Form
             AutoEllipsis = true,
             Padding = new Padding(5),
             ForeColor = Color.FromArgb(65, 65, 65)
-        }, 1, 0);
+        }, 2, 0);
         card.Controls.Add(new Label
         {
             Text = $"{notificationEvent.Title}\r\n{notificationEvent.Message}",
@@ -183,7 +193,7 @@ public sealed class RankingNotificationForm : Form
             Padding = new Padding(7, 3, 5, 3),
             Font = new Font("맑은 고딕", 9.5F, FontStyle.Bold),
             ForeColor = HighlightColor(notificationEvent.Highlight)
-        }, 2, 0);
+        }, 3, 0);
         return card;
     }
 

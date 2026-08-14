@@ -17,6 +17,7 @@ var tests = new List<(string Name, Action Run)>
     ("캐시와 최신 매물 신규 항목 병합", MergeOnlyMissingListings),
     ("현재 목록과 API 결과 추가·삭제 동기화", ReconcileCurrentListings),
     ("매물목록과 순위 API 동시 실행", RunListingAndRankingConcurrently),
+    ("랭킹 API 제한 병렬 실행", RunRankingRequestsConcurrently),
     ("매물 전체·조회 진행 표시", FormatListingLookupProgress),
     ("랭킹 체크 선택 범위", SelectRankingTargets),
     ("매물 표시 행수 선택", PaginateListings),
@@ -109,9 +110,10 @@ static void NormalizeCookies()
 
 static void DetectChanges()
 {
-    var mine = new Listing("2600000001", "테스트아파트 101동", "매매", "5억", "우리부동산", "mine", "", "101동", "10/20", "84", true)
+    var mine = new Listing("2600000001", "서울시 강남구 · 테스트아파트 · 101동 · 남향 올수리 · 10/20층", "매매", "5억", "우리부동산", "mine", "", "101동", "10/20", "84", true)
     {
-        ArticleName = "테스트아파트"
+        ArticleName = "테스트아파트",
+        Description = "남향 올수리"
     };
     var competitor = new Listing("2600000002", "테스트아파트 101동", "매매", "5억 2,000", "다른부동산", "other", "", "101동", "10/20", "84");
     var result = new RankingResult(mine, 5, 2, "5억", "5억 2,000", [mine, competitor]);
@@ -123,7 +125,7 @@ static void DetectChanges()
     Assert(comparison.Events.Any(x => x.Title == "동일매물 가격 변경"), "가격 알림");
     Assert(comparison.Events.Any(x => x.Title == "단독매물 상태 변경"), "신규 동일매물 알림");
     Assert(comparison.Events.All(x => x.ArticleNo == mine.ArticleNo), "모든 변동에 내 매물번호 연결");
-    Assert(comparison.Events.All(x => x.ListingName == "테스트아파트 101동"), "모든 변동에 매물명 연결");
+    Assert(comparison.Events.All(x => x.ListingName == mine.Address), "모든 변동에 목록과 동일한 매물종류/설명 연결");
     Assert(comparison.Events.All(x => x.TradeSummary == "매매 5억"), "모든 변동에 거래정보 연결");
     Assert(comparison.Events.Single(x => x.Title == "매물 랭킹 변경").Highlight == NotificationHighlight.RankDown, "순위 하락 강조색 분류");
 }
@@ -543,6 +545,36 @@ static void RunListingAndRankingConcurrently()
     Assert(handler.MaxConcurrency >= 2, "목록과 순위 HTTP 요청 동시 진행");
 }
 
+static void RunRankingRequestsConcurrently()
+{
+    using var handler = new ConcurrentEndpointHandler(250);
+    var configuration = new ApiConfiguration
+    {
+        Ranking = new ApiEndpointConfiguration
+        {
+            Endpoint = "/api/articles",
+            Headers = new Dictionary<string, string>(),
+            Params = new Dictionary<string, string>()
+        }
+    };
+    using var client = new NaverLandClient(configuration, handler);
+    var settings = new AppSettings { GroupId = "group-a" };
+    var listings = Enumerable.Range(1, 5)
+        .Select(index => new Listing($"26000004{index:00}", "테스트", "매매", "5억", "", "group-a", "", "", "", "", true))
+        .ToList();
+    var ownNumbers = listings.Select(listing => listing.ArticleNo).ToHashSet(StringComparer.Ordinal);
+    var stopwatch = System.Diagnostics.Stopwatch.StartNew();
+
+    Task.WhenAll(listings.Select(listing =>
+            client.GetRankingAsync(listing, ownNumbers, settings, CancellationToken.None)))
+        .GetAwaiter()
+        .GetResult();
+    stopwatch.Stop();
+
+    Assert(handler.MaxConcurrency >= 2, "랭킹 HTTP 요청 병렬 진행");
+    Assert(stopwatch.Elapsed < TimeSpan.FromSeconds(2), "기존 3초 고정 대기 제거");
+}
+
 static void BlockDuplicateApplicationInstance()
 {
     var mutexName = $@"Local\NaverPropertyRanking.Test.{Guid.NewGuid():N}";
@@ -782,7 +814,7 @@ sealed class StubHandler(Func<HttpRequestMessage, HttpResponseMessage> responder
     }
 }
 
-sealed class ConcurrentEndpointHandler : HttpMessageHandler
+sealed class ConcurrentEndpointHandler(int delayMilliseconds = 100) : HttpMessageHandler
 {
     private int _activeRequests;
     private int _maxConcurrency;
@@ -797,7 +829,7 @@ sealed class ConcurrentEndpointHandler : HttpMessageHandler
         UpdateMaximum(active);
         try
         {
-            await Task.Delay(100, cancellationToken);
+            await Task.Delay(delayMilliseconds, cancellationToken);
             var isRanking = request.RequestUri?.Query.Contains("representativeArticleNo") == true;
             return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
             {
