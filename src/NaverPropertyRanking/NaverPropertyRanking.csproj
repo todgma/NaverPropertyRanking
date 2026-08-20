@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\ranking-icon.ico</ApplicationIcon>
     <AssemblyName>NaverPropertyRanking</AssemblyName>
     <RootNamespace>NaverPropertyRanking</RootNamespace>
-    <Version>1.2.6</Version>
+    <Version>0.0.8</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="appsettings.json" LogicalName="NaverPropertyRanking.appsettings.json" />

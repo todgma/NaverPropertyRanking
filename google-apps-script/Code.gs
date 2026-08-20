@@ -5,7 +5,7 @@ const NOTICE_SHEET = '공지사항';
 const MEMBER_GROUP_SHEET = '회원_단체';
 const MEMBER_HEADERS = [
   '아이디', '비밀번호해시', '솔트', '이름', '가입일시',
-  '멤버십 시작일자', '멤버십 종료일자', '사용가능PC수'
+  '멤버십 시작일자', '멤버십 종료일자', '사용가능PC수', '등급'
 ];
 const HISTORY_HEADERS = ['토큰', '로그인일시', '아이디', '아이피'];
 const SESSION_HEADERS = [
@@ -17,7 +17,9 @@ const MEMBER_GROUP_HEADERS = ['id', '단체id'];
 const LEGACY_HASH_ITERATIONS = 8000;
 const CURRENT_HASH_ITERATIONS = 500;
 const CURRENT_HASH_PREFIX = 'v2$';
-const DEFAULT_SIGNUP_MEMBERSHIP_DAYS = 8;
+// 회원가입 시 멤버십 종료일자 기본값: 가입일 다음날(가입 당일 하루 사용 가능).
+const DEFAULT_SIGNUP_MEMBERSHIP_DAYS = 1;
+const DEFAULT_MEMBER_GRADE = 1;
 
 function doPost(e) {
   try {
@@ -119,18 +121,17 @@ function signUp_(request) {
     }
 
     const properties = PropertiesService.getScriptProperties();
-    const membershipDays = positiveInt_(
-      properties.getProperty('DEFAULT_MEMBERSHIP_DAYS'),
-      DEFAULT_SIGNUP_MEMBERSHIP_DAYS
-    );
+    // 가입 시 종료일자는 스크립트 속성(DEFAULT_MEMBERSHIP_DAYS) 값과 무관하게
+    // 항상 가입일 다음날로 고정한다. 예: 2026-08-20 가입 → 종료일자 2026-08-21.
     const allowedPcCount = positiveInt_(properties.getProperty('DEFAULT_ALLOWED_PC_COUNT'), 1);
     const now = new Date();
     const membershipStart = startOfDay_(now);
-    const membershipEnd = addDays_(membershipStart, membershipDays);
+    const membershipEnd = addDays_(membershipStart, DEFAULT_SIGNUP_MEMBERSHIP_DAYS);
     const salt = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
     const passwordHash = hashPasswordV2_(password, salt);
     sheets.members.appendRow([
-      userId, passwordHash, salt, name, now, membershipStart, membershipEnd, allowedPcCount
+      userId, passwordHash, salt, name, now, membershipStart, membershipEnd, allowedPcCount,
+      DEFAULT_MEMBER_GRADE
     ]);
     const memberRow = sheets.members.getLastRow();
     sheets.members.getRange(memberRow, 5).setNumberFormat('yyyy-mm-dd hh:mm:ss');
@@ -204,6 +205,7 @@ function login_(request) {
       membershipEnd: end.toISOString(),
       allowedPcCount: member.allowedPcCount,
       currentPcCount: activeTokens.size,
+      grade: member.grade,
       notices: notices
     };
   } finally {
@@ -254,6 +256,7 @@ function heartbeat_(request) {
       message: '접속 상태가 갱신되었습니다.',
       allowedPcCount: member.allowedPcCount,
       currentPcCount: activeTokens.size,
+      grade: member.grade,
       membershipEnd: end.toISOString(),
       notices: getNotices_(sheets.notices)
     };
@@ -327,6 +330,7 @@ function ensureSheets_() {
   const allSheets = spreadsheet.getSheets();
   const sheetsByName = new Map(allSheets.map(sheet => [sheet.getName(), sheet]));
   const members = ensureSheet_(spreadsheet, sheetsByName, MEMBER_SHEET, MEMBER_HEADERS);
+  ensureMemberGrades_(members);
   const history = ensureSheet_(spreadsheet, sheetsByName, HISTORY_SHEET, HISTORY_HEADERS);
   const sessions = ensureSheet_(spreadsheet, sheetsByName, SESSION_SHEET, SESSION_HEADERS);
   const memberGroups = ensureSheet_(spreadsheet, sheetsByName, MEMBER_GROUP_SHEET, MEMBER_GROUP_HEADERS);
@@ -380,8 +384,30 @@ function ensureSheet_(spreadsheet, sheetsByName, name, headers) {
     sheet.setFrozenRows(1);
     sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold');
     sheet.autoResizeColumns(1, headers.length);
+  } else {
+    const currentHeaders = sheet
+      .getRange(1, 1, 1, Math.max(sheet.getLastColumn(), headers.length))
+      .getDisplayValues()[0];
+    headers.forEach((header, index) => {
+      if (!String(currentHeaders[index] || '').trim()) sheet.getRange(1, index + 1).setValue(header);
+    });
   }
   return sheet;
+}
+
+function ensureMemberGrades_(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+  const gradeColumn = MEMBER_HEADERS.indexOf('등급') + 1;
+  const range = sheet.getRange(2, gradeColumn, lastRow - 1, 1);
+  const values = range.getValues();
+  let changed = false;
+  values.forEach(row => {
+    if (positiveInt_(row[0], 0) > 0) return;
+    row[0] = DEFAULT_MEMBER_GRADE;
+    changed = true;
+  });
+  if (changed) range.setValues(values);
 }
 
 function findMember_(sheet, userId) {
@@ -398,7 +424,8 @@ function findMember_(sheet, userId) {
       name: String(rows[index][3]),
       membershipStart: rows[index][5],
       membershipEnd: rows[index][6],
-      allowedPcCount: positiveInt_(rows[index][7], 1)
+      allowedPcCount: positiveInt_(rows[index][7], 1),
+      grade: positiveInt_(rows[index][8], DEFAULT_MEMBER_GRADE)
     };
   }
   return null;

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Windows.Forms;
 using NaverPropertyRanking.Models;
 using NaverPropertyRanking.Services;
 
@@ -13,12 +14,48 @@ public sealed class MainForm : Form
     private readonly GoogleAuthenticationClient? _authenticationClient;
     private readonly AuthenticationSession? _authenticationSession;
     private readonly System.Windows.Forms.Timer? _sessionHeartbeatTimer;
-    private readonly TextBox _groupId = new() { Width = 210, PlaceholderText = "네이버 부동산 단체 ID" };
-    private readonly TextBox _articleNumbers = new() { Width = 280, PlaceholderText = "예: 2612345678, 2612345679" };
-    private readonly CheckBox _saveGroupId = new() { Text = "저장", AutoSize = true, Checked = true, Padding = new Padding(0, 6, 0, 0) };
-    private readonly Button _loadButton = new() { Text = "매물목록조회", Width = 125, Height = 32 };
+    private readonly string _currentVersion;
+    private readonly TextBox _groupId = new() { Width = 150, PlaceholderText = "네이버 부동산 단체 ID" };
+    private readonly TextBox _articleNumbers = new() { Width = 150, PlaceholderText = "예: 2612345678, 2612345679" };
+    private readonly CheckBox _saveGroupId = new() { Text = "저장", AutoSize = true, Checked = true, Padding = new Padding(0, 6, 0, 0), Visible = false };
+    private readonly Button _loadButton = new() { Text = "매물동기화", Width = 125, Height = 32 };
     private readonly Button _refreshButton = new() { Text = "순위조회", Width = 100, Height = 32, Enabled = false };
+    private readonly Button _retryFailedRankingsButton = new()
+    {
+        Text = "실패 재조회",
+        Width = 110,
+        Height = 32,
+        Enabled = false,
+        Visible = false
+    };
+    private readonly Button _advertisementAnalysisButton = new()
+    {
+        Text = "광고분석",
+        Width = 95,
+        Height = 32,
+        Enabled = false
+    };
     private readonly Button _settingsButton = new() { Text = "설정", Width = 75, Height = 32 };
+    private readonly Button _excelExportButton = new()
+    {
+        Text = "Excel 출력",
+        Width = 112,
+        Height = 30,
+        Enabled = false,
+        TextAlign = ContentAlignment.MiddleCenter,
+        BackColor = Color.FromArgb(16, 124, 65),
+        ForeColor = Color.White,
+        FlatStyle = FlatStyle.Flat,
+        UseVisualStyleBackColor = false,
+        Cursor = Cursors.Hand,
+        Font = new Font("맑은 고딕", 9F, FontStyle.Bold),
+        FlatAppearance =
+        {
+            BorderSize = 0,
+            MouseOverBackColor = Color.FromArgb(12, 145, 72),
+            MouseDownBackColor = Color.FromArgb(9, 101, 52)
+        }
+    };
     private readonly Button _previousPageButton = new() { Text = "◀ 이전", Width = 90, Height = 30 };
     private readonly Button _nextPageButton = new() { Text = "다음 ▶", Width = 90, Height = 30 };
     private readonly Label _pageLabel = new() { AutoSize = true, TextAlign = ContentAlignment.MiddleCenter };
@@ -57,7 +94,8 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _noticeRotationTimer = new() { Interval = 60_000 };
     private readonly CancellationTokenSource _lifetime = new();
     private readonly HashSet<string> _expanded = [];
-    private readonly HashSet<string> _selectedArticleNumbers = [];
+    private readonly HashSet<string> _propertyAnalysisInProgress = [];
+    private readonly HashSet<string> _failedRankingArticleNumbers = [];
     private Dictionary<string, ListingSnapshot> _snapshots;
     private readonly Dictionary<string, RankingResult> _rankingCache = [];
     private List<Listing> _ownListings = [];
@@ -69,6 +107,8 @@ public sealed class MainForm : Form
     private bool _hideTipShown;
     private DateTime? _lastRateLimitNoticeUntilUtc;
     private DateTime? _lastRankingCompletedUtc;
+    private DateTime? _nextScheduledRefreshUtc;
+    private bool _autoRetryFailedRankingsRunning;
     private readonly HashSet<string> _lastCompletedRankingTargets = [];
     private bool _hasLoadedListings;
     private readonly List<RankingNotificationForm> _notificationPopups = [];
@@ -79,6 +119,7 @@ public sealed class MainForm : Form
     private DateTime? _restoredListingCacheAtUtc;
     private ListingSortOrder _listingSortOrder = ListingSortOrder.DuplicateCountDescending;
     private bool _startupCacheSynchronizationStarted;
+    private bool _applyingColumnOrder;
 
     public MainForm(
         LocalStore store,
@@ -87,7 +128,8 @@ public sealed class MainForm : Form
         ApiConfiguration apiConfiguration,
         AuthenticationSession? authenticationSession = null,
         GoogleAuthenticationClient? authenticationClient = null,
-        GoogleAuthenticationConfiguration? authenticationConfiguration = null)
+        GoogleAuthenticationConfiguration? authenticationConfiguration = null,
+        string? currentVersion = null)
     {
         _store = store;
         _apiClient = apiClient;
@@ -99,6 +141,10 @@ public sealed class MainForm : Form
         _apiConfiguration = apiConfiguration;
         _authenticationClient = authenticationClient;
         _authenticationSession = authenticationSession;
+        _advertisementAnalysisButton.Enabled = CanUseAdvertisementAnalysis;
+        _currentVersion = string.IsNullOrWhiteSpace(currentVersion)
+            ? Application.ProductVersion
+            : currentVersion.Trim();
         _snapshots = store.LoadSnapshots();
 
         Text = BuildWindowTitle(authenticationSession);
@@ -169,18 +215,20 @@ public sealed class MainForm : Form
         var searchLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 7,
+            ColumnCount = 9,
             RowCount = 2,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = header.BackColor
         };
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 75));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 135));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 85));
         searchLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
         searchLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
@@ -194,21 +242,10 @@ public sealed class MainForm : Form
             Padding = Padding.Empty,
             BackColor = header.BackColor
         };
-        titleLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240));
+        titleLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100));
         titleLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 70));
         titleLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         titleLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-        var title = new Label
-        {
-            Text = "네이버 매물 순위",
-            AutoSize = true,
-            Anchor = AnchorStyles.Left,
-            Font = new Font("맑은 고딕", 14F, FontStyle.Bold),
-            ForeColor = Color.FromArgb(3, 105, 65),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Margin = Padding.Empty
-        };
         var noticeTitle = new Label
         {
             Text = "공지사항",
@@ -218,14 +255,24 @@ public sealed class MainForm : Form
             ForeColor = Color.FromArgb(33, 46, 42),
             Margin = Padding.Empty
         };
+        var version = new Label
+        {
+            Text = $"버전 {_currentVersion}",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Font = new Font("맑은 고딕", 9F, FontStyle.Bold),
+            ForeColor = Color.FromArgb(86, 103, 97),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(6, 3, 0, 0)
+        };
         _noticePanel.Margin = new Padding(0, 5, 0, 5);
         _noticePanel.Controls.Add(_noticeText);
         _noticePanel.Controls.Add(_noticeScroll);
-        titleLayout.Controls.Add(title, 0, 0);
+        titleLayout.Controls.Add(version, 0, 0);
         titleLayout.Controls.Add(noticeTitle, 1, 0);
         titleLayout.Controls.Add(_noticePanel, 2, 0);
         searchLayout.Controls.Add(titleLayout, 0, 0);
-        searchLayout.SetColumnSpan(titleLayout, 7);
+        searchLayout.SetColumnSpan(titleLayout, 9);
 
         var groupLabel = new Label
         {
@@ -243,7 +290,11 @@ public sealed class MainForm : Form
         _saveGroupId.Padding = Padding.Empty;
         _saveGroupId.Margin = Padding.Empty;
 
-        foreach (var button in new[] { _loadButton, _refreshButton, _settingsButton })
+        foreach (var button in new[]
+                 {
+                     _loadButton, _refreshButton, _retryFailedRankingsButton,
+                     _advertisementAnalysisButton, _settingsButton
+                 })
         {
             button.Dock = DockStyle.None;
             button.Anchor = AnchorStyles.None;
@@ -252,10 +303,12 @@ public sealed class MainForm : Form
 
         searchLayout.Controls.Add(groupLabel, 0, 1);
         searchLayout.Controls.Add(_groupId, 1, 1);
-        searchLayout.Controls.Add(_saveGroupId, 2, 1);
-        searchLayout.Controls.Add(_loadButton, 4, 1);
-        searchLayout.Controls.Add(_refreshButton, 5, 1);
-        searchLayout.Controls.Add(_settingsButton, 6, 1);
+        searchLayout.Controls.Add(_loadButton, 2, 1);
+        searchLayout.Controls.Add(_refreshButton, 3, 1);
+        searchLayout.Controls.Add(_advertisementAnalysisButton, 4, 1);
+        searchLayout.Controls.Add(_saveGroupId, 5, 1);
+        searchLayout.Controls.Add(_retryFailedRankingsButton, 6, 1);
+        searchLayout.Controls.Add(_settingsButton, 8, 1);
         header.Controls.Add(searchLayout);
 
         ConfigureGrid();
@@ -276,16 +329,30 @@ public sealed class MainForm : Form
 
     private Control BuildSortPanel()
     {
-        var panel = new FlowLayoutPanel
+        var container = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
             Height = 42,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = Padding.Empty,
+            BackColor = Color.FromArgb(247, 250, 249)
+        };
+        container.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        container.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
+        container.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        var optionsPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Padding = new Padding(12, 8, 0, 0),
-            BackColor = Color.FromArgb(247, 250, 249)
+            Margin = Padding.Empty,
+            BackColor = container.BackColor
         };
-        panel.Controls.Add(new Label
+        optionsPanel.Controls.Add(new Label
         {
             Text = "검색조건",
             AutoSize = true,
@@ -294,8 +361,8 @@ public sealed class MainForm : Form
             Margin = new Padding(0, 4, 12, 0)
         });
         _excludeSingleListings.Margin = new Padding(0, 3, 28, 0);
-        panel.Controls.Add(_excludeSingleListings);
-        panel.Controls.Add(new Label
+        optionsPanel.Controls.Add(_excludeSingleListings);
+        optionsPanel.Controls.Add(new Label
         {
             Text = "정렬방법",
             AutoSize = true,
@@ -312,9 +379,13 @@ public sealed class MainForm : Form
                  })
         {
             option.Margin = new Padding(0, 3, 22, 0);
-            panel.Controls.Add(option);
+            optionsPanel.Controls.Add(option);
         }
-        return panel;
+        _excelExportButton.Anchor = AnchorStyles.None;
+        _excelExportButton.Margin = new Padding(6, 6, 10, 6);
+        container.Controls.Add(optionsPanel, 0, 0);
+        container.Controls.Add(_excelExportButton, 1, 0);
+        return container;
     }
 
     private Control BuildPagingPanel()
@@ -349,6 +420,7 @@ public sealed class MainForm : Form
         _grid.BorderStyle = BorderStyle.None;
         _grid.AllowUserToAddRows = false;
         _grid.AllowUserToDeleteRows = false;
+        _grid.AllowUserToOrderColumns = true;
         _grid.AllowUserToResizeRows = false;
         _grid.ReadOnly = true;
         _grid.MultiSelect = false;
@@ -362,22 +434,112 @@ public sealed class MainForm : Form
         _grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(33, 46, 42);
         _grid.ColumnHeadersDefaultCellStyle.ForeColor = Color.White;
         _grid.ColumnHeadersDefaultCellStyle.Font = new Font("맑은 고딕", 9F, FontStyle.Bold);
+        _grid.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
         _grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(221, 242, 233);
         _grid.DefaultCellStyle.SelectionForeColor = Color.Black;
 
-        _grid.Columns.Add(new DataGridViewCheckBoxColumn { Name = "Selected", HeaderText = "☐ 전체", Width = 72, ThreeState = true, SortMode = DataGridViewColumnSortMode.NotSortable });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Expand", HeaderText = "", Width = 42, SortMode = DataGridViewColumnSortMode.NotSortable });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Mine", HeaderText = "구분", Width = 65 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "ArticleNo", HeaderText = "네이버 매물번호", Width = 135 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Address", HeaderText = "매물종류/설명", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill, MinimumWidth = 260 });
+        var articleNoColumn = new DataGridViewTextBoxColumn
+        {
+            Name = "ArticleNo",
+            HeaderText = "매물번호",
+            Width = 150,
+            MinimumWidth = 150,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+            DefaultCellStyle = new DataGridViewCellStyle
+            {
+                Alignment = DataGridViewContentAlignment.MiddleCenter
+            }
+        };
+        articleNoColumn.HeaderCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+        _grid.Columns.Add(articleNoColumn);
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "PropertyType", HeaderText = "매물유형", Width = 90 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Address", HeaderText = "매물명/소재지", Width = 280, MinimumWidth = 180 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Trade", HeaderText = "거래유형", Width = 80 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Price", HeaderText = "거래금액", Width = 120 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "PreviousRank", HeaderText = "이전랭킹", Width = 82 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "CurrentRank", HeaderText = "현재랭킹", Width = 105 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "QueryResult", HeaderText = "조회결과", Width = 78 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "PreviousRank", HeaderText = "이전순위", Width = 82 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "CurrentRank", HeaderText = "현재순위", Width = 105 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Total", HeaderText = "동일매물", Width = 85 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Realtor", HeaderText = "공인중개사", Width = 180 });
-        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Provider", HeaderText = "정보제공", Width = 100 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Provider", HeaderText = "CP사", Width = 100 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "VerificationMethod", HeaderText = "검증방식", Width = 95 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Status", HeaderText = "상태", Width = 180 });
+        _grid.Columns.Add(new DataGridViewButtonColumn
+        {
+            Name = "PropertyAnalysis",
+            HeaderText = "물건분석",
+            Width = 100,
+            SortMode = DataGridViewColumnSortMode.NotSortable,
+            FlatStyle = FlatStyle.Flat
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "Description",
+            HeaderText = "설명",
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            MinimumWidth = 260
+        });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn
+        {
+            Name = "ComplexNo",
+            HeaderText = "단지번호",
+            Visible = false,
+            SortMode = DataGridViewColumnSortMode.NotSortable
+        });
+        ApplySavedGridColumnOrder();
+    }
+
+    private void ApplySavedGridColumnOrder()
+    {
+        var savedOrder = _settings.GridColumnOrder ?? [];
+        if (savedOrder.Count == 0)
+        {
+            _grid.Columns["PropertyAnalysis"].DisplayIndex = _grid.Columns["Mine"].DisplayIndex;
+            return;
+        }
+
+        _applyingColumnOrder = true;
+        try
+        {
+            var nextIndex = 0;
+            foreach (var columnName in savedOrder)
+            {
+                if (!_grid.Columns.Contains(columnName)) continue;
+                _grid.Columns[columnName].DisplayIndex = nextIndex++;
+            }
+
+            foreach (var column in _grid.Columns.Cast<DataGridViewColumn>()
+                         .Where(column => !savedOrder.Contains(column.Name, StringComparer.Ordinal))
+                         .OrderBy(column => column.Index))
+                column.DisplayIndex = nextIndex++;
+
+            if (!savedOrder.Contains("VerificationMethod", StringComparer.Ordinal))
+                _grid.Columns["VerificationMethod"].DisplayIndex =
+                    _grid.Columns["Provider"].DisplayIndex + 1;
+
+            // 저장된 순서에 조회결과 컬럼이 없으면(기존 사용자) 이전순위 바로 앞에 배치한다.
+            if (!savedOrder.Contains("QueryResult", StringComparer.Ordinal))
+                _grid.Columns["QueryResult"].DisplayIndex =
+                    _grid.Columns["PreviousRank"].DisplayIndex;
+        }
+        finally
+        {
+            _applyingColumnOrder = false;
+        }
+    }
+
+    private void SaveGridColumnOrder()
+    {
+        if (_applyingColumnOrder || _grid.Columns.Count == 0) return;
+        var columnOrder = _grid.Columns.Cast<DataGridViewColumn>()
+            .OrderBy(column => column.DisplayIndex)
+            .Select(column => column.Name)
+            .ToList();
+        if ((_settings.GridColumnOrder ?? []).SequenceEqual(columnOrder, StringComparer.Ordinal)) return;
+        _settings.GridColumnOrder = columnOrder;
+        _store.SaveSettings(_settings);
     }
 
     private NotifyIcon BuildTrayIcon()
@@ -392,7 +554,7 @@ public sealed class MainForm : Form
         var icon = new NotifyIcon
         {
             Icon = _applicationIcon,
-            Text = "네이버 매물 순위",
+            Text = "매물분석알림",
             Visible = true,
             ContextMenuStrip = menu
         };
@@ -403,16 +565,20 @@ public sealed class MainForm : Form
     private void WireEvents()
     {
         _loadButton.Click += async (_, _) => await StartListingWorkflowAsync();
-        _refreshButton.Click += async (_, _) => await RefreshSelectedRankingsAsync(false);
+        _refreshButton.Click += async (_, _) => await RefreshAllRankingsAsync(false);
+        _retryFailedRankingsButton.Click += async (_, _) => await RetryFailedRankingsAsync();
+        _advertisementAnalysisButton.Click += async (_, _) => await ShowOwnedComplexListPopupAsync();
         _settingsButton.Click += (_, _) => OpenSettings();
+        _excelExportButton.Click += (_, _) => ExportCurrentListToExcel();
         _timer.Tick += async (_, _) =>
         {
-            if (_hasLoadedListings) await RefreshSelectedRankingsAsync(true);
+            _nextScheduledRefreshUtc = DateTime.UtcNow.AddMilliseconds(_timer.Interval);
+            if (_hasLoadedListings) await RefreshAllAsync(true);
         };
         _cooldownUiTimer.Tick += (_, _) => UpdateCooldownUi();
         _noticeRotationTimer.Tick += (_, _) => AdvanceNotice();
         _grid.CellClick += GridOnCellClick;
-        _grid.ColumnHeaderMouseClick += GridOnColumnHeaderMouseClick;
+        _grid.ColumnDisplayIndexChanged += (_, _) => SaveGridColumnOrder();
         _grid.CellDoubleClick += GridOnCellDoubleClick;
         _grid.KeyDown += GridOnKeyDown;
         _noticeScroll.Scroll += (_, _) => ShowNotice(_noticeScroll.Value);
@@ -469,12 +635,15 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (!ShowSettingsDialog()) return;
+        //if (!ShowSettingsDialog()) return;
         _startingListingWorkflow = true;
         SetListingLoadBusy(true);
         SetStatus("회원_단체 정보를 확인하는 중...");
         try
         {
+            if (MessageBox.Show(this, "단체 ID " + _settings.GroupId + "의 매물 동기화를 진행하시겠습니까?", "확인", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.No)
+                return;
+
             if (!await EnsureMemberGroupAsync(_settings.GroupId)) return;
         }
         finally
@@ -482,7 +651,7 @@ public sealed class MainForm : Form
             _startingListingWorkflow = false;
             SetListingLoadBusy(false);
         }
-        await RefreshAllAsync(false);
+        await RefreshAllAsync(false, replaceExisting: true);
     }
 
     private async Task TrayRefreshAsync()
@@ -493,7 +662,7 @@ public sealed class MainForm : Form
             SetStatus("단체 ID 입력 후 매물목록조회를 먼저 실행해 주세요.");
             return;
         }
-        await RefreshSelectedRankingsAsync(false);
+        await RefreshAllRankingsAsync(false);
     }
 
     private void GridOnKeyDown(object? sender, KeyEventArgs e)
@@ -515,7 +684,7 @@ public sealed class MainForm : Form
         e.SuppressKeyPress = true;
     }
 
-    private async Task RefreshAllAsync(bool isAutomatic)
+    private async Task RefreshAllAsync(bool isAutomatic, bool replaceExisting = false)
     {
         if (_refreshing) return;
         _settings.GroupId = _groupId.Text.Trim();
@@ -539,13 +708,13 @@ public sealed class MainForm : Form
             return;
         }
 
-        if (_settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow)
+        if (_settings.RateLimitBlockedUntilUtc is { } rateLimitUntil && rateLimitUntil > DateTime.UtcNow)
         {
-            HandleRateLimit(blockedUntil);
+            HandleRateLimit(rateLimitUntil);
             return;
         }
 
-        if (HasDisplayedListingsForCurrentIdentity())
+        if (!replaceExisting && HasDisplayedListingsForCurrentIdentity())
         {
             await SynchronizeDisplayedListingsAsync(isAutomatic);
             return;
@@ -557,15 +726,26 @@ public sealed class MainForm : Form
         try
         {
             _store.SaveSettings(_settings);
+            if (replaceExisting)
+            {
+                foreach (var articleNo in _ownListings.Select(listing => listing.ArticleNo))
+                    _snapshots.Remove(articleNo);
+                _store.SaveSnapshots(_snapshots);
+                _store.RemoveListingCache(CurrentLoginId(), _settings.GroupId);
+            }
             _ownListings = [];
             _rankingCache.Clear();
-            _selectedArticleNumbers.Clear();
             _expanded.Clear();
+            _propertyAnalysisInProgress.Clear();
+            _failedRankingArticleNumbers.Clear();
+            _lastCompletedRankingTargets.Clear();
+            _lastRankingCompletedUtc = null;
             _results = [];
             _currentPage = 1;
             _hasLoadedListings = false;
             _loadedListingLoginId = null;
             _loadedListingGroupId = null;
+            _lastChecked.Text = string.Empty;
             RenderGrid();
 
             var listingProgress = new Progress<ListingLoadProgress>(progress =>
@@ -613,6 +793,7 @@ public sealed class MainForm : Form
                 rankingSummary.SuccessCount,
                 rankingSummary.FailureCount,
                 rankingSummary.Events);
+            EnsureAutoRetryFailedRankingsLoop();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -693,7 +874,7 @@ public sealed class MainForm : Form
         }
     }
 
-    private async Task RefreshSelectedRankingsAsync(bool isAutomatic)
+    private async Task RefreshAllRankingsAsync(bool isAutomatic)
     {
         if (_refreshing) return;
         _settings.GroupId = _groupId.Text.Trim();
@@ -721,15 +902,13 @@ public sealed class MainForm : Form
             return;
         }
 
-        var targets = RankingTargetSelector.Select(_ownListings, _selectedArticleNumbers);
-        var refreshAll = targets.Count == _ownListings.Count;
-        var scope = refreshAll ? $"전체 {_ownListings.Count}건" : $"선택 {targets.Count}건";
+        var scope = $"전체 {_ownListings.Count}건";
 
         _refreshing = true;
         SetBusy(true);
         try
         {
-            await RankListingsCoreAsync(targets, true, scope);
+            await RankListingsCoreAsync(_ownListings, true, scope);
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -744,6 +923,157 @@ public sealed class MainForm : Form
         {
             _refreshing = false;
             SetBusy(false);
+        }
+    }
+
+    private async Task RetryFailedRankingsAsync()
+    {
+        if (_refreshing) return;
+
+        var targets = _ownListings
+            .Where(listing => _failedRankingArticleNumbers.Contains(listing.ArticleNo))
+            .ToList();
+        if (targets.Count == 0)
+        {
+            UpdateRetryFailedRankingsButton();
+            SetStatus("재조회할 랭킹 실패 매물이 없습니다.");
+            return;
+        }
+
+        var authError = NaverAuthValidator.GetProfileError("랭킹 API", _apiConfiguration.Ranking);
+        if (authError is not null)
+        {
+            SetStatus(authError);
+            MessageBox.Show(this, authError, "인증 설정 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (_settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow)
+        {
+            HandleRateLimit(blockedUntil);
+            return;
+        }
+
+        _refreshing = true;
+        SetBusy(true);
+        try
+        {
+            var scope = $"실패 매물 재조회 {targets.Count}건";
+            var summary = await RankListingsCoreAsync(targets, true, scope, false);
+            var remainingFailures = _failedRankingArticleNumbers.Count(articleNo =>
+                _ownListings.Any(listing => listing.ArticleNo == articleNo));
+            SetStatus($"완료: {scope} · 성공 {summary.SuccessCount}건 / 실패 {summary.FailureCount}건 · 남은 실패 {remainingFailures}건");
+            ShowRankingCompletionPopup(scope, summary.SuccessCount, summary.FailureCount, summary.Events);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // App is closing.
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"실패 매물 재조회 오류: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "재조회 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _refreshing = false;
+            SetBusy(false);
+        }
+    }
+
+    /// <summary>
+    /// 매물동기화(또는 자동 주기 조회) 직후 랭킹 조회에 실패한 매물이 남아 있으면
+    /// 다음 예정 조회 시각 전까지 실패 매물만 병렬로 반복 재조회한다.
+    /// 이미 실행 중이면 중복 실행하지 않고, 각 회차 결과는 즉시 목록/그리드에 반영된다.
+    /// </summary>
+    private void EnsureAutoRetryFailedRankingsLoop()
+    {
+        if (_autoRetryFailedRankingsRunning) return;
+        _autoRetryFailedRankingsRunning = true;
+        _ = AutoRetryFailedRankingsLoopAsync();
+    }
+
+    private async Task AutoRetryFailedRankingsLoopAsync()
+    {
+        try
+        {
+            var attempt = 0;
+            var backoff = TimeSpan.FromSeconds(5);
+
+            while (!_lifetime.IsCancellationRequested)
+            {
+                var remainingFailures = _failedRankingArticleNumbers.Count(articleNo =>
+                    _ownListings.Any(listing => listing.ArticleNo == articleNo));
+                if (remainingFailures == 0) return;
+
+                if (_nextScheduledRefreshUtc is { } deadline && DateTime.UtcNow >= deadline)
+                {
+                    SetStatus($"다음 조회 시간이 되어 실패 매물 {remainingFailures}건은 다음 주기에 재조회합니다.");
+                    return;
+                }
+                if (_settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow) return;
+                if (NaverAuthValidator.GetProfileError("랭킹 API", _apiConfiguration.Ranking) is not null) return;
+
+                if (_refreshing)
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(5), _lifetime.Token);
+                    continue;
+                }
+
+                var targets = _ownListings
+                    .Where(listing => _failedRankingArticleNumbers.Contains(listing.ArticleNo))
+                    .ToList();
+                if (targets.Count == 0) return;
+
+                attempt++;
+                RankingBatchSummary summary;
+                _refreshing = true;
+                SetBusy(true);
+                try
+                {
+                    var scope = $"실패 매물 자동 재조회 {attempt}회차 {targets.Count}건";
+                    summary = await RankListingsCoreAsync(targets, true, scope, false);
+                }
+                finally
+                {
+                    _refreshing = false;
+                    SetBusy(false);
+                }
+
+                var stillFailing = _failedRankingArticleNumbers.Count(articleNo =>
+                    _ownListings.Any(listing => listing.ArticleNo == articleNo));
+                if (stillFailing == 0)
+                {
+                    // 실패 건수가 0이 된 시점부터 재조회 설정 주기를 새로 시작한다.
+                    ConfigureTimer();
+                    SetStatus(_nextScheduledRefreshUtc is { } nextRefreshUtc
+                        ? $"실패 매물 자동 재조회 완료 · 남은 실패 없음 · 다음 자동 조회 {nextRefreshUtc.ToLocalTime():HH:mm}"
+                        : "실패 매물 자동 재조회 완료 · 남은 실패 없음");
+                    return;
+                }
+                if (_settings.RateLimitBlockedUntilUtc is { } rateLimitUntil && rateLimitUntil > DateTime.UtcNow)
+                    return;
+
+                // 계속 실패하는 경우 네이버 서버에 요청이 몰리지 않도록 대기 시간을 점진적으로 늘린다.
+                backoff = summary.SuccessCount == 0
+                    ? TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 60))
+                    : TimeSpan.FromSeconds(5);
+
+                await Task.Delay(backoff, _lifetime.Token);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // App is closing or the wait was cancelled.
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"실패 매물 자동 재조회 중단: {ex.Message}");
+        }
+        finally
+        {
+            _refreshing = false;
+            SetBusy(false);
+            _autoRetryFailedRankingsRunning = false;
         }
     }
 
@@ -797,9 +1127,11 @@ public sealed class MainForm : Form
         var ownNumbers = _ownListings.Select(x => x.ArticleNo).ToHashSet();
         var allEvents = new List<NotificationEvent>();
         var attemptedResults = new List<RankingResult>();
-        var pendingListings = new Queue<Listing>(ListingSorter
+        var requestedListings = ListingSorter
             .Sort(targetListings, _rankingCache, _listingSortOrder)
-            .Where(listing => forceRefresh || !_rankingCache.ContainsKey(listing.ArticleNo)));
+            .Where(listing => forceRefresh || !_rankingCache.ContainsKey(listing.ArticleNo))
+            .ToList();
+        var pendingListings = new Queue<Listing>(requestedListings);
         var requestCount = pendingListings.Count;
         var completedCount = 0;
         UpdateCurrentPageResults("랭킹 조회 대기");
@@ -822,12 +1154,15 @@ public sealed class MainForm : Form
                     previousRank = savedSnapshot.Rank;
 
                 previousRanks[listing.ArticleNo] = previousRank;
+                if (_settings.PropertyAnalysisEnabled)
+                    _propertyAnalysisInProgress.Add(listing.ArticleNo);
                 var request = _apiClient.GetRankingAsync(listing, ownNumbers, _settings, _lifetime.Token);
                 runningRequests.Add(request, listing);
             }
         }
 
         LaunchAvailableRequests();
+        if (_settings.PropertyAnalysisEnabled) RenderGrid();
         while (runningRequests.Count > 0)
         {
             await Task.WhenAny(runningRequests.Keys);
@@ -840,12 +1175,14 @@ public sealed class MainForm : Form
             {
                 var listing = runningRequests[completedTask];
                 runningRequests.Remove(completedTask);
+                _propertyAnalysisInProgress.Remove(listing.ArticleNo);
                 completedCount++;
                 lastCompletedArticleNo = listing.ArticleNo;
                 var result = (await completedTask) with
                 {
                     PreviousRank = previousRanks[listing.ArticleNo]
                 };
+                result = SynchronizeOwnListingDetails(result);
                 attemptedResults.Add(result);
                 _rankingCache[listing.ArticleNo] = result;
 
@@ -866,6 +1203,21 @@ public sealed class MainForm : Form
             RenderGrid();
             LaunchAvailableRequests();
         }
+
+        foreach (var listing in targetListings)
+            _propertyAnalysisInProgress.Remove(listing.ArticleNo);
+
+        var attemptedResultsByArticleNo = attemptedResults
+            .GroupBy(result => result.OwnListing.ArticleNo, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.Last(), StringComparer.Ordinal);
+        foreach (var listing in requestedListings)
+        {
+            if (attemptedResultsByArticleNo.TryGetValue(listing.ArticleNo, out var result) && result.Success)
+                _failedRankingArticleNumbers.Remove(listing.ArticleNo);
+            else
+                _failedRankingArticleNumbers.Add(listing.ArticleNo);
+        }
+        UpdateRetryFailedRankingsButton();
 
         UpdateCurrentPageResults("랭킹 미조회");
         _store.SaveSnapshots(_snapshots);
@@ -934,8 +1286,7 @@ public sealed class MainForm : Form
         if (!await EnsureMemberGroupAsync(_settings.GroupId)) return;
 
         // 시작 시에도 사용자가 같은 단체 ID로 매물목록조회를 누른 것과 동일하게 처리한다.
-        // 기존 순위 조회와 최신 목록 API를 별도 Task로 시작하고, API 결과를 기준으로
-        // 신규 항목 추가 및 종료 항목 삭제까지 동일한 동기화 경로에서 수행한다.
+        // 최신 목록을 먼저 반영한 다음 갱신된 전체 목록의 순위를 조회한다.
         await SynchronizeDisplayedListingsAsync(true);
     }
 
@@ -959,39 +1310,17 @@ public sealed class MainForm : Form
     {
         _refreshing = true;
         SetListingLoadBusy(true);
-        SetStatus($"현재 매물 {_ownListings.Count}건 순위 조회와 최신 목록 확인을 시작합니다.");
+        SetStatus($"현재 매물 {_ownListings.Count}건을 기준으로 최신 매물목록을 다시 조회합니다.");
 
         try
         {
             _store.SaveSettings(_settings);
-            var displayedListings = ListingSorter
-                .Sort(_ownListings.ToList(), _rankingCache, _listingSortOrder)
-                .ToList();
             var listingProgress = new Progress<ListingLoadProgress>(progress =>
-                SetStatus($"매물목록조회 중 · 최신 목록 {progress.ListingCount}건/{progress.Page}페이지 · 기존 순위 조회 병행"));
-
-            // 최신 목록 API와 현재 화면 매물의 순위 API를 독립 Task로 동시에 시작한다.
-            // 두 API는 각각 전용 요청 게이트와 호출 간격 제한을 사용한다.
-            var latestListingTask = _apiClient.GetOwnListingsAsync(
+                SetStatus($"매물목록 재조회 중 · 최신 목록 {progress.ListingCount}건 · {progress.Page}페이지"));
+            var latestListings = await _apiClient.GetOwnListingsAsync(
                 _settings,
                 _lifetime.Token,
                 listingProgress);
-            var displayedRankingTask = RankListingsCoreAsync(
-                displayedListings,
-                true,
-                $"기존 매물 {displayedListings.Count}건",
-                false);
-
-            IReadOnlyList<Listing> latestListings;
-            try
-            {
-                latestListings = await latestListingTask;
-            }
-            catch
-            {
-                await displayedRankingTask;
-                throw;
-            }
 
             var reconciliation = ListingCollectionMerger.Reconcile(_ownListings, latestListings);
             var removedNumbers = reconciliation.RemovedListings
@@ -1002,8 +1331,8 @@ public sealed class MainForm : Form
             {
                 _rankingCache.Remove(articleNo);
                 _snapshots.Remove(articleNo);
-                _selectedArticleNumbers.Remove(articleNo);
                 _expanded.Remove(articleNo);
+                _failedRankingArticleNumbers.Remove(articleNo);
                 _lastCompletedRankingTargets.Remove(articleNo);
             }
 
@@ -1014,45 +1343,38 @@ public sealed class MainForm : Form
                 .ToHashSet(StringComparer.Ordinal);
             NormalizeLoadedRankingOwnership(ownNumbers);
             RefreshRankingOwnListingDetails();
-            UpdateCurrentPageResults(reconciliation.AddedListings.Count > 0
-                ? "신규 매물 순위 조회 대기"
-                : "랭킹 미조회");
+            UpdateCurrentPageResults("최신 목록 순위 조회 대기");
             RenderGrid();
             _store.SaveSnapshots(_snapshots);
             SaveCurrentListingCache();
 
-            // 최신 목록 비교 결과는 기존 순위 조회 완료를 기다리지 않고 즉시 바인딩한다.
-            // 신규 순위 작업도 바로 등록되며, 순위 API 전용 게이트 안에서 기존 순위 작업과
-            // 안전하게 순서를 나눠 실행된다.
-            var addedRankingTask = reconciliation.AddedListings.Count > 0 &&
-                                   !(_settings.RateLimitBlockedUntilUtc is { } rateLimitUntil && rateLimitUntil > DateTime.UtcNow)
-                ? RankListingsCoreAsync(
-                    ListingSorter.Sort(reconciliation.AddedListings, _rankingCache, _listingSortOrder).ToList(),
-                    true,
-                    $"신규 매물 {reconciliation.AddedListings.Count}건",
-                    false)
-                : Task.FromResult(RankingBatchSummary.Empty);
-
-            var displayedSummary = await displayedRankingTask;
-            var addedSummary = await addedRankingTask;
-
-            // API 결과에서 삭제된 매물의 기존 순위 작업이 이미 진행 중이었을 수 있으므로
-            // 두 순위 작업 완료 후 관련 캐시와 스냅샷을 한 번 더 정리한다.
-            foreach (var articleNo in removedNumbers)
+            if (_ownListings.Count == 0)
             {
-                _rankingCache.Remove(articleNo);
-                _snapshots.Remove(articleNo);
+                SetLoadedListingIdentity(_settings.GroupId);
+                SetStatus($"매물목록 재조회 완료 · 최신 매물 0건 · 삭제 {reconciliation.RemovedListings.Count}건");
+                return;
             }
-            _store.SaveSnapshots(_snapshots);
+
+            SetStatus($"매물목록 재조회 완료 · 최신 {_ownListings.Count}건 · 전체 순위 조회를 시작합니다.");
+            var rankingTargets = ListingSorter
+                .Sort(_ownListings.ToList(), _rankingCache, _listingSortOrder)
+                .ToList();
+            var rankingSummary = await RankListingsCoreAsync(
+                rankingTargets,
+                true,
+                $"최신 매물 전체 {_ownListings.Count}건",
+                false);
 
             SetLoadedListingIdentity(_settings.GroupId);
             SaveCurrentListingCache();
-            var successCount = displayedSummary.SuccessCount + addedSummary.SuccessCount;
-            var failureCount = displayedSummary.FailureCount + addedSummary.FailureCount;
-            var events = displayedSummary.Events.Concat(addedSummary.Events).ToList();
             var scope = $"최신 {_ownListings.Count}건 · 신규 {reconciliation.AddedListings.Count}건 · 삭제 {reconciliation.RemovedListings.Count}건";
-            SetStatus($"완료: {scope} · 순위 성공 {successCount}건 / 실패 {failureCount}건");
-            ShowRankingCompletionPopup(scope, successCount, failureCount, events);
+            SetStatus($"완료: {scope} · 순위 성공 {rankingSummary.SuccessCount}건 / 실패 {rankingSummary.FailureCount}건");
+            ShowRankingCompletionPopup(
+                scope,
+                rankingSummary.SuccessCount,
+                rankingSummary.FailureCount,
+                rankingSummary.Events);
+            EnsureAutoRetryFailedRankingsLoop();
         }
         catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
         {
@@ -1064,8 +1386,12 @@ public sealed class MainForm : Form
             SetStatus($"기존 목록은 유지했습니다. 매물목록조회 실패: {ex.Message}");
             if (ex.StatusCode == HttpStatusCode.TooManyRequests)
                 HandleRateLimit(_settings.RateLimitBlockedUntilUtc ?? DateTime.UtcNow.AddMinutes(30));
-            else if (!isAutomatic)
-                MessageBox.Show(this, ex.Message, "조회 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            else
+            {
+                if (!isAutomatic)
+                    MessageBox.Show(this, ex.Message, "조회 실패", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                await RankExistingListingsAfterSynchronizationFailureAsync(ex.Message, isAutomatic);
+            }
         }
         catch (Exception ex)
         {
@@ -1073,6 +1399,7 @@ public sealed class MainForm : Form
             SetStatus($"기존 목록은 유지했습니다. 매물목록조회 실패: {ex.Message}");
             if (!isAutomatic)
                 MessageBox.Show(this, ex.Message, "조회 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            await RankExistingListingsAfterSynchronizationFailureAsync(ex.Message, isAutomatic);
         }
         finally
         {
@@ -1081,17 +1408,96 @@ public sealed class MainForm : Form
         }
     }
 
+    private async Task RankExistingListingsAfterSynchronizationFailureAsync(
+        string listingError,
+        bool isAutomatic)
+    {
+        if (_ownListings.Count == 0) return;
+
+        var rankingAuthError = NaverAuthValidator.GetProfileError("랭킹 API", _apiConfiguration.Ranking);
+        if (rankingAuthError is not null)
+        {
+            SetStatus($"매물목록 동기화 실패 · 기존 목록 유지 · 랭킹 조회 불가: {rankingAuthError}");
+            return;
+        }
+
+        try
+        {
+            var targets = ListingSorter
+                .Sort(_ownListings.ToList(), _rankingCache, _listingSortOrder)
+                .ToList();
+            var scope = $"목록 동기화 실패 후 기존 매물 {_ownListings.Count}건";
+            SetStatus($"매물목록 동기화에 실패하여 기존 목록으로 랭킹을 조회합니다: {listingError}");
+            var summary = await RankListingsCoreAsync(targets, true, scope, false);
+            SetStatus($"완료: 매물목록 동기화 실패 · 기존 목록 유지 · 랭킹 성공 {summary.SuccessCount}건 / 실패 {summary.FailureCount}건");
+            ShowRankingCompletionPopup(scope, summary.SuccessCount, summary.FailureCount, summary.Events);
+            EnsureAutoRetryFailedRankingsLoop();
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // App is closing.
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"매물목록 동기화 및 기존 목록 랭킹 조회 실패: {ex.Message}");
+            if (!isAutomatic)
+                MessageBox.Show(this, ex.Message, "랭킹 조회 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     private void RefreshRankingOwnListingDetails()
     {
-        foreach (var listing in _ownListings)
+        for (var index = 0; index < _ownListings.Count; index++)
         {
+            var listing = _ownListings[index];
             if (!_rankingCache.TryGetValue(listing.ArticleNo, out var result)) continue;
+            var merged = MergeListingDetails(listing, result.OwnListing);
+            _ownListings[index] = merged;
             _rankingCache[listing.ArticleNo] = result with
             {
-                OwnListing = listing with { IsMine = true }
+                OwnListing = merged
             };
         }
     }
+
+    private RankingResult SynchronizeOwnListingDetails(RankingResult result)
+    {
+        var ownIndex = _ownListings.FindIndex(listing =>
+            string.Equals(listing.ArticleNo, result.OwnListing.ArticleNo, StringComparison.Ordinal));
+        if (ownIndex < 0) return result;
+
+        var merged = MergeListingDetails(result.OwnListing, _ownListings[ownIndex]);
+        _ownListings[ownIndex] = merged;
+        return result with { OwnListing = merged };
+    }
+
+    private static Listing MergeListingDetails(Listing preferred, Listing fallback) =>
+        new(
+            preferred.ArticleNo,
+            FirstNotEmpty(preferred.Address, fallback.Address),
+            FirstNotEmpty(preferred.TradeType, fallback.TradeType),
+            FirstNotEmpty(preferred.Price, fallback.Price),
+            FirstNotEmpty(preferred.RealtorName, fallback.RealtorName),
+            FirstNotEmpty(preferred.RealtorId, fallback.RealtorId),
+            FirstNotEmpty(preferred.ProviderName, fallback.ProviderName),
+            FirstNotEmpty(preferred.BuildingName, fallback.BuildingName),
+            FirstNotEmpty(preferred.FloorInfo, fallback.FloorInfo),
+            FirstNotEmpty(preferred.Area, fallback.Area),
+            true)
+        {
+            ComplexNo = FirstNotEmpty(preferred.ComplexNo, fallback.ComplexNo),
+            ArticleName = FirstNotEmpty(preferred.ArticleName, fallback.ArticleName),
+            RealEstateType = FirstNotEmpty(preferred.RealEstateType, fallback.RealEstateType),
+            Location = FirstNotEmpty(preferred.Location, fallback.Location),
+            Description = FirstNotEmpty(preferred.Description, fallback.Description),
+            RegisteredDate = FirstNotEmpty(preferred.RegisteredDate, fallback.RegisteredDate),
+            VerificationTypeCode = FirstNotEmpty(
+                preferred.VerificationTypeCode,
+                fallback.VerificationTypeCode),
+            SameAddressCount = preferred.SameAddressCount > 0
+                ? preferred.SameAddressCount
+                : fallback.SameAddressCount
+        };
 
     private sealed record RankingBatchSummary(
         int SuccessCount,
@@ -1152,8 +1558,8 @@ public sealed class MainForm : Form
                 AddComparableRow(result, comparable);
         }
         _grid.ResumeLayout();
-        UpdateSelectionHeader();
         UpdatePagingControls();
+        _excelExportButton.Enabled = !_refreshing && _results.Count > 0;
     }
 
     private void AddParentRow(RankingResult result)
@@ -1161,23 +1567,36 @@ public sealed class MainForm : Form
         var listing = result.OwnListing;
         var expandable = result.Comparables.Count > 0;
         var rowIndex = _grid.Rows.Add(
-            _selectedArticleNumbers.Contains(listing.ArticleNo),
             expandable ? (_expanded.Contains(listing.ArticleNo) ? "▼" : "▶") : string.Empty,
             "내 매물",
             listing.ArticleNo,
-            listing.Address,
+            PropertyTypeDisplay(listing),
+            ListingNameDisplay(listing),
             listing.TradeType,
             listing.Price,
+            QueryResultDisplay(result),
             RankPresentation.FormatPrevious(result.PreviousRank),
             RankPresentation.FormatCurrent(result.PreviousRank, result.Rank),
             result.Success ? $"{result.Total}건" : "-",
             listing.RealtorName,
             listing.ProviderName,
-            result.Success ? PriceRange(result) : result.Error);
+            VerificationTypeFormatter.Format(listing.VerificationTypeCode),
+            result.Success ? PriceRange(result) : result.Error,
+            PropertyAnalysisDisplay(listing),
+            listing.Description);
+        _grid.Rows[rowIndex].Cells["ComplexNo"].Value = listing.ComplexNo;
         var row = _grid.Rows[rowIndex];
         row.Tag = new GridRowTag(result, listing, false);
+        ConfigurePropertyAnalysisCell(row, true);
         row.DefaultCellStyle.Font = new Font(_grid.Font, FontStyle.Bold);
         row.DefaultCellStyle.BackColor = Color.FromArgb(244, 250, 247);
+        var queryResultCell = row.Cells["QueryResult"];
+        var queryResultColor = result.Success
+            ? Color.FromArgb(0, 128, 64)
+            : Color.Firebrick;
+        queryResultCell.Style.ForeColor = queryResultColor;
+        queryResultCell.Style.SelectionForeColor = queryResultColor;
+        queryResultCell.Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
         var currentRankCell = row.Cells["CurrentRank"];
         currentRankCell.Style.BackColor = Color.FromArgb(255, 246, 194);
         currentRankCell.Style.SelectionBackColor = Color.FromArgb(255, 232, 128);
@@ -1193,41 +1612,287 @@ public sealed class MainForm : Form
         if (!result.Success) row.DefaultCellStyle.ForeColor = Color.Firebrick;
     }
 
+    /// <summary>
+    /// 조회결과 컬럼 표시값: 순위조회 성공은 "성공", 조회했지만 실패한 매물은 "실패",
+    /// 아직 조회하지 않은(대기 중) 매물은 "-"로 표시한다.
+    /// </summary>
+    private string QueryResultDisplay(RankingResult result)
+    {
+        if (result.Success) return "성공";
+        return _failedRankingArticleNumbers.Contains(result.OwnListing.ArticleNo) ||
+               _rankingCache.ContainsKey(result.OwnListing.ArticleNo)
+            ? "실패"
+            : "-";
+    }
+
     private void AddComparableRow(RankingResult result, Listing listing)
     {
         var rowIndex = _grid.Rows.Add(
-            null,
             string.Empty,
             listing.IsMine ? "내 매물" : "동일매물",
-            listing.ArticleNo,
-            "    " + listing.Address,
+            $"└ {listing.ArticleNo}",
+            PropertyTypeDisplay(listing),
+            "    " + ListingNameDisplay(listing),
             listing.TradeType,
             listing.Price,
+            string.Empty,
             string.Empty,
             result.Comparables.ToList().FindIndex(x => x.ArticleNo == listing.ArticleNo) + 1 + "위",
             string.Empty,
             listing.RealtorName,
             listing.ProviderName,
-            JoinDetails(listing));
+            VerificationTypeFormatter.Format(listing.VerificationTypeCode),
+            JoinDetails(listing),
+            "-",
+            listing.Description);
+        _grid.Rows[rowIndex].Cells["ComplexNo"].Value = listing.ComplexNo;
         var row = _grid.Rows[rowIndex];
         row.Tag = new GridRowTag(result, listing, true);
-        row.Cells["Selected"].ReadOnly = true;
+        ConfigurePropertyAnalysisCell(row, false);
         row.DefaultCellStyle.BackColor = listing.IsMine ? Color.FromArgb(232, 247, 239) : Color.White;
         row.DefaultCellStyle.ForeColor = listing.IsMine ? Color.FromArgb(0, 105, 62) : Color.FromArgb(55, 55, 55);
     }
 
-    private void GridOnCellClick(object? sender, DataGridViewCellEventArgs e)
+    private void ExportCurrentListToExcel()
     {
-        if (e.RowIndex < 0) return;
+        if (_results.Count == 0)
+        {
+            MessageBox.Show(this, "Excel로 출력할 매물 목록이 없습니다.", "Excel 출력", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using var dialog = new SaveFileDialog
+        {
+            Title = "매물 목록 Excel 저장",
+            Filter = "Excel 통합 문서 (*.xlsx)|*.xlsx",
+            DefaultExt = "xlsx",
+            AddExtension = true,
+            OverwritePrompt = true,
+            FileName = $"매물목록_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
+            InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        try
+        {
+            var columns = CurrentExcelColumns();
+            var listRows = _results
+                .Select(result => BuildExcelRow(result, result.OwnListing, isChild: false, childRank: null))
+                .ToList();
+            var detailColumns = DetailExcelColumns();
+            var detailRows = new List<ExcelExportRow>();
+            var detailResults = ExcelDetailResultSelector.Select(_results);
+            for (var resultIndex = 0; resultIndex < detailResults.Count; resultIndex++)
+            {
+                var result = detailResults[resultIndex];
+                detailRows.Add(BuildDetailExcelRow(result, result.OwnListing, isChild: false, childRank: null));
+                for (var index = 0; index < result.Comparables.Count; index++)
+                    detailRows.Add(BuildDetailExcelRow(result, result.Comparables[index], isChild: true, childRank: index + 1));
+                if (resultIndex < detailResults.Count - 1)
+                    detailRows.Add(new ExcelExportRow(
+                        new Dictionary<string, string>(StringComparer.Ordinal),
+                        IsSeparator: true));
+            }
+
+            ExcelExportService.Export(dialog.FileName, columns, listRows, detailColumns, detailRows);
+            SetStatus($"Excel 출력 완료: {dialog.FileName}");
+            var openResult = MessageBox.Show(
+                this,
+                $"Excel 파일을 저장했습니다.\n{dialog.FileName}\n\n지금 파일을 실행하시겠습니까?",
+                "Excel 출력 완료",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Question);
+            if (openResult == DialogResult.Yes)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(dialog.FileName)
+                    {
+                        UseShellExecute = true
+                    });
+                }
+                catch (Exception ex)
+                {
+                    SetStatus($"Excel 저장 완료, 파일 실행 실패: {ex.Message}");
+                    MessageBox.Show(
+                        this,
+                        $"파일은 저장했지만 실행하지 못했습니다.\n{ex.Message}",
+                        "Excel 파일 실행 실패",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Excel 출력 실패: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "Excel 출력 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private IReadOnlyList<ExcelExportColumn> CurrentExcelColumns() =>
+        _grid.Columns.Cast<DataGridViewColumn>()
+            .Where(column => column.Name is not "Expand" and not "ComplexNo")
+            .OrderBy(column => column.DisplayIndex)
+            .Select(column => new ExcelExportColumn(column.Name, column.HeaderText))
+            .ToList();
+
+    private static IReadOnlyList<ExcelExportColumn> DetailExcelColumns() =>
+    [
+        new("CurrentRank", "현재순위"),
+        new("Movement", "변동"),
+        new("PreviousRank", "이전순위"),
+        new("Total", "동일매물"),
+        new("ArticleNo", "매물번호"),
+        new("BuildingName", "단지/건물명"),
+        new("Location", "주소"),
+        new("PropertyType", "매물종류"),
+        new("Trade", "거래유형"),
+        new("Price", "금액"),
+        new("RegisteredDate", "등록일"),
+        new("Provider", "CP사"),
+        new("VerificationMethod", "검증방식"),
+        new("Realtor", "중개사무소"),
+        new("GroupId", "단체ID")
+    ];
+
+    private ExcelExportRow BuildExcelRow(
+        RankingResult result,
+        Listing listing,
+        bool isChild,
+        int? childRank)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Mine"] = isChild ? listing.IsMine ? "내 매물" : "동일매물" : "내 매물",
+            ["ArticleNo"] = isChild ? $"└ {listing.ArticleNo}" : listing.ArticleNo,
+            ["PropertyType"] = PropertyTypeDisplay(listing),
+            ["Address"] = ListingNameDisplay(listing),
+            ["Trade"] = listing.TradeType,
+            ["Price"] = listing.Price,
+            ["QueryResult"] = isChild ? string.Empty : QueryResultDisplay(result),
+            ["PreviousRank"] = isChild ? string.Empty : RankPresentation.FormatPrevious(result.PreviousRank),
+            ["CurrentRank"] = isChild
+                ? childRank is null ? string.Empty : $"{childRank}위"
+                : RankPresentation.FormatCurrent(result.PreviousRank, result.Rank),
+            ["Total"] = isChild ? string.Empty : result.Success ? $"{result.Total}건" : "-",
+            ["Realtor"] = listing.RealtorName,
+            ["Provider"] = listing.ProviderName,
+            ["VerificationMethod"] = VerificationTypeFormatter.Format(listing.VerificationTypeCode),
+            ["Status"] = isChild
+                ? JoinDetails(listing)
+                : result.Success ? PriceRange(result) : result.Error ?? string.Empty,
+            ["PropertyAnalysis"] = isChild ? "-" : PropertyAnalysisDisplay(listing),
+            ["Description"] = listing.Description
+        };
+        return new ExcelExportRow(
+            values,
+            OutlineLevel: isChild ? 1 : 0,
+            HighlightedColumns: isChild ? null : new HashSet<string>(StringComparer.Ordinal) { "CurrentRank" });
+    }
+
+    private ExcelExportRow BuildDetailExcelRow(
+        RankingResult result,
+        Listing listing,
+        bool isChild,
+        int? childRank)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["CurrentRank"] = isChild ? childRank?.ToString() ?? string.Empty : result.Rank?.ToString() ?? "-",
+            ["Movement"] = isChild
+                ? listing.IsMine ? "내 매물" : string.Empty
+                : RankMovementDisplay(result.PreviousRank, result.Rank),
+            ["PreviousRank"] = isChild ? string.Empty : result.PreviousRank?.ToString() ?? "-",
+            ["Total"] = isChild ? string.Empty : result.Success ? result.Total.ToString() : "-",
+            ["ArticleNo"] = isChild ? $"└ {listing.ArticleNo}" : listing.ArticleNo,
+            ["BuildingName"] = BuildingNameDisplay(listing),
+            ["Location"] = LocationDisplay(listing),
+            ["PropertyType"] = PropertyTypeDisplay(listing),
+            ["Trade"] = listing.TradeType,
+            ["Price"] = listing.Price,
+            ["RegisteredDate"] = RegistrationDateDisplay(listing.RegisteredDate),
+            ["Provider"] = listing.ProviderName,
+            ["VerificationMethod"] = VerificationTypeFormatter.Format(listing.VerificationTypeCode),
+            ["Realtor"] = listing.RealtorName,
+            ["GroupId"] = FirstNotEmpty(_loadedListingGroupId, _groupId.Text.Trim())
+        };
+        return new ExcelExportRow(
+            values,
+            HighlightMine: isChild && listing.IsMine,
+            HighlightGroupHeader: !isChild);
+    }
+
+    private static string RankMovementDisplay(int? previousRank, int? currentRank)
+    {
+        if (previousRank is null || currentRank is null || previousRank == currentRank) return string.Empty;
+        var difference = Math.Abs(previousRank.Value - currentRank.Value);
+        return RankPresentation.GetMovement(previousRank, currentRank) == RankMovement.Up
+            ? $"▲{difference}"
+            : $"▼{difference}";
+    }
+
+    private static string BuildingNameDisplay(Listing listing)
+    {
+        var values = new[] { listing.ArticleName, listing.BuildingName }
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (values.Length > 0) return string.Join(" · ", values);
+        return string.IsNullOrWhiteSpace(listing.Address) ? "-" : listing.Address;
+    }
+
+    private static string LocationDisplay(Listing listing) =>
+        FirstNotEmpty(listing.Location, listing.Address, "-");
+
+    private static string RegistrationDateDisplay(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+        var formats = new[] { "yyyyMMdd", "yyyy-MM-dd", "yyyy.MM.dd", "yyMMdd", "yy-MM-dd", "yy.MM.dd" };
+        return DateTime.TryParseExact(
+            value.Trim(),
+            formats,
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.None,
+            out var date)
+            ? date.ToString("yy.MM.dd", System.Globalization.CultureInfo.InvariantCulture)
+            : value.Trim();
+    }
+
+    private static string FirstNotEmpty(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value)) ?? string.Empty;
+
+    private void ConfigurePropertyAnalysisCell(DataGridViewRow row, bool isOwnListing)
+    {
+        var columnIndex = _grid.Columns["PropertyAnalysis"].Index;
+        if (!isOwnListing)
+        {
+            row.Cells[columnIndex] = new DataGridViewTextBoxCell
+            {
+                Value = "-",
+                Style = new DataGridViewCellStyle
+                {
+                    Alignment = DataGridViewContentAlignment.MiddleCenter
+                }
+            };
+            return;
+        }
+
+        row.Cells[columnIndex].Value = "분석";
+        row.Cells[columnIndex].ToolTipText = "이 매물과 동일매물 전체의 상세정보를 비교합니다.";
+        row.Cells[columnIndex].Style.Alignment = DataGridViewContentAlignment.MiddleCenter;
+        row.Cells[columnIndex].Style.BackColor = Color.FromArgb(232, 247, 239);
+        row.Cells[columnIndex].Style.SelectionBackColor = Color.FromArgb(201, 232, 215);
+    }
+
+    private async void GridOnCellClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex < 0) return;
         if (_grid.Rows[e.RowIndex].Tag is not GridRowTag { IsChild: false } tag) return;
         var columnName = _grid.Columns[e.ColumnIndex].Name;
-        if (columnName == "Selected")
+        if (columnName == "PropertyAnalysis")
         {
-            if (!_selectedArticleNumbers.Add(tag.Listing.ArticleNo))
-                _selectedArticleNumbers.Remove(tag.Listing.ArticleNo);
-            _grid.Rows[e.RowIndex].Cells["Selected"].Value = _selectedArticleNumbers.Contains(tag.Listing.ArticleNo);
-            UpdateSelectionHeader();
-            SetStatus($"랭킹 재조회 선택: {_selectedArticleNumbers.Count}/{_ownListings.Count}건");
+            await OpenPropertyAnalysisAsync(tag.Listing);
             return;
         }
         if (columnName != "Expand") return;
@@ -1237,34 +1902,10 @@ public sealed class MainForm : Form
         RenderGrid();
     }
 
-    private void GridOnColumnHeaderMouseClick(object? sender, DataGridViewCellMouseEventArgs e)
-    {
-        if (e.ColumnIndex < 0 || _grid.Columns[e.ColumnIndex].Name != "Selected" || _ownListings.Count == 0) return;
-
-        if (_selectedArticleNumbers.Count == _ownListings.Count)
-        {
-            _selectedArticleNumbers.Clear();
-        }
-        else
-        {
-            _selectedArticleNumbers.Clear();
-            foreach (var listing in _ownListings) _selectedArticleNumbers.Add(listing.ArticleNo);
-        }
-        RenderGrid();
-        SetStatus($"랭킹 재조회 선택: {_selectedArticleNumbers.Count}/{_ownListings.Count}건");
-    }
-
-    private void UpdateSelectionHeader()
-    {
-        if (!_grid.Columns.Contains("Selected")) return;
-        var allSelected = _ownListings.Count > 0 && _selectedArticleNumbers.Count == _ownListings.Count;
-        _grid.Columns["Selected"].HeaderText = allSelected ? "☑ 전체" : "☐ 전체";
-    }
-
     private void GridOnCellDoubleClick(object? sender, DataGridViewCellEventArgs e)
     {
         if (e.RowIndex < 0 || _grid.Rows[e.RowIndex].Tag is not GridRowTag tag) return;
-        if (_grid.Columns[e.ColumnIndex].Name is "Selected" or "Expand") return;
+        if (_grid.Columns[e.ColumnIndex].Name is "Expand" or "PropertyAnalysis") return;
         if (string.IsNullOrWhiteSpace(tag.Listing.ArticleNo)) return;
         try
         {
@@ -1280,6 +1921,282 @@ public sealed class MainForm : Form
         }
     }
 
+    private bool CanUseAdvertisementAnalysis => _authenticationSession?.Grade == 2;
+
+    private async Task OpenPropertyAnalysisAsync(Listing listing)
+    {
+        if (_refreshing)
+        {
+            SetStatus("다른 조회가 진행 중입니다. 완료 후 분석을 다시 눌러 주세요.");
+            return;
+        }
+        //if (!CanUseAdvertisementAnalysis)
+        //{
+        //    MessageBox.Show(
+        //        this,
+        //        "물건분석은 회원 등급 2 계정에서 사용할 수 있습니다.",
+        //        "물건분석",
+        //        MessageBoxButtons.OK,
+        //        MessageBoxIcon.Information);
+        //    return;
+        //}
+
+        var authError = NaverAuthValidator.GetProfileError("랭킹 API", _apiConfiguration.Ranking);
+        if (authError is not null)
+        {
+            MessageBox.Show(this, authError, "인증 설정 필요", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        if (_settings.RateLimitBlockedUntilUtc is { } propertyAnalysisBlockedUntil &&
+            propertyAnalysisBlockedUntil > DateTime.UtcNow)
+        {
+            HandleRateLimit(propertyAnalysisBlockedUntil);
+            return;
+        }
+
+        _refreshing = true;
+        _propertyAnalysisInProgress.Add(listing.ArticleNo);
+        SetBusy(true);
+        RenderGrid();
+        try
+        {
+            SetStatus($"물건분석 동일매물 조회 중 · {listing.ArticleNo}");
+            await RankListingsCoreAsync(
+                [listing],
+                true,
+                $"물건분석 {listing.ArticleNo}",
+                false);
+
+            if (!_rankingCache.TryGetValue(listing.ArticleNo, out var rankingResult) || !rankingResult.Success)
+            {
+                MessageBox.Show(
+                    this,
+                    "동일매물 정보를 조회하지 못했습니다. 실패 재조회 후 다시 시도해 주세요.",
+                    "물건분석",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            var competitors = rankingResult.Comparables
+                .Select((item, index) => new { Listing = item, ExposureRank = index + 1 })
+                .Where(item => !item.Listing.IsMine &&
+                               !string.Equals(
+                                   item.Listing.ArticleNo,
+                                   rankingResult.OwnListing.ArticleNo,
+                                   StringComparison.Ordinal))
+                .GroupBy(item => item.Listing.ArticleNo, StringComparer.Ordinal)
+                .Select(group => group.First())
+                .OrderBy(item => item.ExposureRank)
+                .Take(2)
+                .ToList();
+            if (competitors.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    $"해당 매물에 동일매물이 없습니다.\n매물번호: {listing.ArticleNo}",
+                    "물건분석",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                SetStatus($"물건분석 종료 · 동일매물 없음 · {listing.ArticleNo}");
+                return;
+            }
+
+            var detailCache = new Dictionary<string, ArticleComparisonDetail>(StringComparer.Ordinal);
+            var detailRequestTotal = competitors.Count + 1;
+            var detailRequestIndex = 0;
+            async Task<ArticleComparisonDetail> LoadDetailAsync(Listing target)
+            {
+                if (detailCache.TryGetValue(target.ArticleNo, out var cached)) return cached;
+                detailRequestIndex++;
+                SetStatus($"물건분석 상세정보 조회 중 · {detailRequestIndex}/{detailRequestTotal} · {target.ArticleNo}");
+                try
+                {
+                    var detail = await _apiClient.GetArticleComparisonDetailAsync(
+                        target,
+                        _settings,
+                        _lifetime.Token);
+                    detailCache[target.ArticleNo] = detail;
+                    return detail;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    var failed = new ArticleComparisonDetail(target) { Error = ex.Message };
+                    detailCache[target.ArticleNo] = failed;
+                    return failed;
+                }
+            }
+
+            var ownDetail = await LoadDetailAsync(rankingResult.OwnListing);
+            var synchronizedResult = SynchronizeOwnListingDetails(rankingResult with
+            {
+                OwnListing = MergeListingDetails(ownDetail.Listing, rankingResult.OwnListing)
+            });
+            _rankingCache[listing.ArticleNo] = synchronizedResult;
+            var comparisonDetails = new List<RankedArticleComparison>(competitors.Count);
+            for (var index = 0; index < competitors.Count; index++)
+            {
+                var competitor = competitors[index];
+                comparisonDetails.Add(new RankedArticleComparison(
+                    index + 1,
+                    competitor.ExposureRank,
+                    await LoadDetailAsync(competitor.Listing)));
+            }
+
+            var analysis = new AdvertisementListingAnalysis(
+                synchronizedResult,
+                ownDetail with { Listing = synchronizedResult.OwnListing },
+                comparisonDetails);
+            SaveCurrentListingCache();
+            UpdateCurrentPageResults("랭킹 미조회");
+            RenderGrid();
+            SetStatus($"물건분석 표시 · {listing.ArticleNo} · 상위 동일매물 {comparisonDetails.Count}건");
+            using var dialog = new PropertyAnalysisForm(analysis);
+            dialog.ShowDialog(this);
+        }
+        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        {
+            // App is closing.
+        }
+        catch (Exception ex)
+        {
+            if (_settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow)
+                HandleRateLimit(blockedUntil);
+            SetStatus($"물건분석 실패: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "물건분석 실패", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _propertyAnalysisInProgress.Remove(listing.ArticleNo);
+            _refreshing = false;
+            SetBusy(false);
+            RenderGrid();
+        }
+    }
+
+    /// <summary>
+    /// 광고분석 버튼: 현재 조회된 내 매물의 단지번호를 중복 없이 추린다.
+    /// 단지번호가 비어 있는 매물은 매물 상세 API로 보강하고,
+    /// 단지번호별로 단지 정보 API(/api/complexes/{complexNo})를 조회해 팝업으로 보여준다.
+    /// </summary>
+    private async Task ShowOwnedComplexListPopupAsync()
+    {
+        if (_refreshing) return;
+        if (!CanUseAdvertisementAnalysis)
+        {
+            MessageBox.Show(
+                this,
+                "광고분석은 회원 등급 2 계정에서 사용할 수 있습니다.",
+                "광고분석",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+        if (_ownListings.Count == 0)
+        {
+            MessageBox.Show(
+                this,
+                "매물목록조회를 먼저 실행해 주세요.",
+                "광고분석",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+            return;
+        }
+        if (_settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow)
+        {
+            HandleRateLimit(blockedUntil);
+            return;
+        }
+
+        _refreshing = true;
+        SetBusy(true);
+        try
+        {
+            // 1) 단지번호가 비어 있는 내 매물을 매물 상세 API로 보강한다.
+            var hydrateTargets = Enumerable.Range(0, _ownListings.Count)
+                .Where(index => string.IsNullOrWhiteSpace(_ownListings[index].ComplexNo) &&
+                                !string.IsNullOrWhiteSpace(_ownListings[index].ArticleNo))
+                .ToList();
+            var hydratedCount = 0;
+            for (var i = 0; i < hydrateTargets.Count; i++)
+            {
+                var index = hydrateTargets[i];
+                var listing = _ownListings[index];
+                SetStatus($"광고분석 단지번호 확인 중 · {i + 1}/{hydrateTargets.Count} · {listing.ArticleNo}");
+                try
+                {
+                    var hydrated = await _apiClient.HydrateComplexIdentityAsync(
+                        listing,
+                        _settings,
+                        _lifetime.Token);
+                    if (string.IsNullOrWhiteSpace(hydrated.ComplexNo)) continue;
+                    _ownListings[index] = MergeListingDetails(hydrated, listing);
+                    hydratedCount++;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // 호출 제한이면 남은 보강을 중단하고 확보된 단지번호로 계속 진행한다.
+                    if (_settings.RateLimitBlockedUntilUtc is { } cooldown && cooldown > DateTime.UtcNow)
+                    {
+                        HandleRateLimit(cooldown);
+                        break;
+                    }
+                }
+            }
+            if (hydratedCount > 0) SaveCurrentListingCache();
+
+            // 2) 단지번호를 중복 없이 그룹핑한다.
+            var complexes = AdvertisementAnalysisService.GroupOwnedComplexes(_ownListings);
+            if (complexes.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "내 매물 중 단지 정보가 있는 매물이 없습니다.",
+                    "광고분석",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+                return;
+            }
+
+            // 3) 단지번호별 단지 정보와 광고 상위 중개인을 조회한다.
+            var information = new Dictionary<string, ComplexInformation>(StringComparer.Ordinal);
+            var advertisementRealtors =
+                new Dictionary<string, IReadOnlyList<ComplexAdvertisementRealtor>>(StringComparer.Ordinal);
+            for (var i = 0; i < complexes.Count; i++)
+            {
+                var complex = complexes[i];
+                SetStatus($"단지정보 조회 중 · {i + 1}/{complexes.Count} · {complex.ComplexName}");
+                information[complex.ComplexNo] = await _apiClient.GetComplexInformationAsync(
+                    complex.ComplexNo,
+                    complex.ComplexName,
+                    _settings,
+                    _lifetime.Token);
+                advertisementRealtors[complex.ComplexNo] =
+                    await _apiClient.GetComplexAdvertisementRealtorsAsync(
+                        complex.ComplexNo,
+                        _settings,
+                        _lifetime.Token);
+            }
+
+            SetStatus($"광고분석 · 단지 {complexes.Count}곳 단지정보 조회 완료");
+            using var dialog = new OwnedComplexListForm(
+                complexes,
+                information,
+                advertisementRealtors,
+                FirstNotEmpty(_loadedListingGroupId, _groupId.Text.Trim(), _settings.GroupId));
+            dialog.ShowDialog(this);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            _refreshing = false;
+            SetBusy(false);
+            RenderGrid();
+        }
+    }
+
     private void OpenSettings()
     {
         ShowSettingsDialog();
@@ -1287,6 +2204,7 @@ public sealed class MainForm : Form
 
     private bool ShowSettingsDialog()
     {
+        var popupNotificationsWereEnabled = _settings.PopupNotificationsEnabled;
         _settings.GroupId = _groupId.Text.Trim();
         _settings.SaveGroupId = _saveGroupId.Checked;
         _settings.ManualArticleNumbers = string.Empty;
@@ -1303,15 +2221,27 @@ public sealed class MainForm : Form
         _store.SaveSettings(_settings);
         ConfigureTimer();
         UpdateCooldownUi();
-        SetStatus("설정을 저장했습니다. API 헤더는 appsettings.json에서 관리합니다.");
+        RenderGrid();
+        if (popupNotificationsWereEnabled && !_settings.PopupNotificationsEnabled)
+            CloseNotificationPopups();
+        SetStatus("설정을 저장했습니다.");
         return true;
     }
 
     private void ConfigureTimer()
     {
         _timer.Stop();
+        _settings.PollIntervalMinutes = AppSettings.NormalizePollInterval(_settings.PollIntervalMinutes);
         _timer.Interval = checked(_settings.PollIntervalMinutes * 60 * 1000);
-        if (_settings.AutoRefresh) _timer.Start();
+        if (_settings.AutoRefresh)
+        {
+            _timer.Start();
+            _nextScheduledRefreshUtc = DateTime.UtcNow.AddMilliseconds(_timer.Interval);
+        }
+        else
+        {
+            _nextScheduledRefreshUtc = null;
+        }
     }
 
     private void ApplySettingsToUi()
@@ -1342,8 +2272,10 @@ public sealed class MainForm : Form
             if (!ownArticleNumbers.Contains(result.OwnListing.ArticleNo)) continue;
             _rankingCache[result.OwnListing.ArticleNo] = result;
         }
+        _failedRankingArticleNumbers.Clear();
+        foreach (var result in _rankingCache.Values.Where(result => !result.Success))
+            _failedRankingArticleNumbers.Add(result.OwnListing.ArticleNo);
 
-        _selectedArticleNumbers.Clear();
         _expanded.Clear();
         _currentPage = 1;
         _hasLoadedListings = _ownListings.Count > 0;
@@ -1352,6 +2284,7 @@ public sealed class MainForm : Form
         _restoredListingCacheAtUtc = cache.SavedAtUtc;
         UpdateCurrentPageResults("랭킹 미조회");
         RenderGrid();
+        UpdateRetryFailedRankingsButton();
         _lastChecked.Text = $"로컬 저장: {cache.SavedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss}";
     }
 
@@ -1448,7 +2381,7 @@ public sealed class MainForm : Form
 
     private static string BuildWindowTitle(AuthenticationSession? session)
     {
-        const string applicationTitle = "네이버 매물 순위";
+        const string applicationTitle = "매물분석알림";
         if (session is null) return applicationTitle;
         var remainingDays = session.MembershipEnd is { } membershipEnd
             ? Math.Max(0, (membershipEnd.Date - DateTime.Today).Days)
@@ -1488,6 +2421,7 @@ public sealed class MainForm : Form
         var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
         _loadButton.Enabled = !_refreshing && !blocked;
         _refreshButton.Enabled = !_refreshing && !blocked && _hasLoadedListings;
+        UpdateRetryFailedRankingsButton(_refreshing);
         UpdatePagingControls();
         if (blocked)
         {
@@ -1507,15 +2441,30 @@ public sealed class MainForm : Form
         }
     }
 
+    private void UpdateRetryFailedRankingsButton(bool busy = false)
+    {
+        var ownArticleNumbers = _ownListings
+            .Select(listing => listing.ArticleNo)
+            .ToHashSet(StringComparer.Ordinal);
+        _failedRankingArticleNumbers.RemoveWhere(articleNo => !ownArticleNumbers.Contains(articleNo));
+        var failureCount = _failedRankingArticleNumbers.Count;
+        var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
+        _retryFailedRankingsButton.Text = failureCount == 0
+            ? "실패 재조회"
+            : $"실패 재조회 ({failureCount})";
+        _retryFailedRankingsButton.Enabled = !busy && !blocked && failureCount > 0;
+    }
+
     private void ShowRankingCompletionPopup(
         string scope,
         int successCount,
         int failureCount,
         IReadOnlyList<NotificationEvent> events)
     {
-        if (IsDisposed || !IsHandleCreated) return;
+        if (!_settings.PopupNotificationsEnabled || IsDisposed || !IsHandleCreated) return;
         BeginInvoke(() =>
         {
+            if (!_settings.PopupNotificationsEnabled) return;
             // 조회 완료 팝업을 표시하기 전에 남아 있는 진행 차광창을 항상 해제한다.
             _busyOverlay.Hide();
             var popupDefinitions = NotificationPopupPlanner.Create(events);
@@ -1558,6 +2507,12 @@ public sealed class MainForm : Form
         });
     }
 
+    private void CloseNotificationPopups()
+    {
+        foreach (var popup in _notificationPopups.Where(popup => !popup.IsDisposed).ToList())
+            popup.Close();
+    }
+
     private void ActivateAfterNotificationPopupClosed()
     {
         if (IsDisposed || !IsHandleCreated) return;
@@ -1581,6 +2536,8 @@ public sealed class MainForm : Form
 
     private void OnFormClosing(object? sender, FormClosingEventArgs e)
     {
+        // 드래그 도중 발생한 마지막 DisplayIndex까지 다음 실행에 복원되도록 종료 시 재저장한다.
+        SaveGridColumnOrder();
         if (e.CloseReason is CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)
         {
             _reallyExit = true;
@@ -1601,19 +2558,9 @@ public sealed class MainForm : Form
         _settings.RankImmediatelyAfterListingLoad = true;
         _settings.DisplayPageSize = 0;
         _store.SaveSettings(_settings);
-        var refreshCheckedListingsInBackground = RankingTargetSelector.ShouldRefreshOnClose(
-            _ownListings,
-            _selectedArticleNumbers,
-            _lastCompletedRankingTargets,
-            _lastRankingCompletedUtc,
-            DateTime.UtcNow);
         Hide();
         ShowInTaskbar = false;
-        if (refreshCheckedListingsInBackground)
-            BeginInvoke(async () => await RefreshSelectedRankingsAsync(true));
-        ShowBackgroundTip(refreshCheckedListingsInBackground
-            ? "선택한 매물의 랭킹을 백그라운드에서 조회합니다."
-            : "랭킹 모니터가 시스템 트레이에서 계속 실행됩니다.");
+        ShowBackgroundTip("랭킹 모니터가 시스템 트레이에서 계속 실행됩니다.");
     }
 
     private void ShowBackgroundTip(string message)
@@ -1690,7 +2637,10 @@ public sealed class MainForm : Form
         var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
         _loadButton.Enabled = !busy && !blocked;
         _refreshButton.Enabled = !busy && !blocked && _hasLoadedListings;
+        UpdateRetryFailedRankingsButton(busy);
+        _advertisementAnalysisButton.Enabled = !busy && CanUseAdvertisementAnalysis;
         _settingsButton.Enabled = !busy;
+        _excelExportButton.Enabled = !busy && _results.Count > 0;
         _groupId.Enabled = !busy;
         _articleNumbers.Enabled = !busy;
         _saveGroupId.Enabled = !busy;
@@ -1712,7 +2662,10 @@ public sealed class MainForm : Form
         var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
         _loadButton.Enabled = !busy && !blocked;
         _refreshButton.Enabled = !busy && !blocked && _hasLoadedListings;
+        UpdateRetryFailedRankingsButton(busy);
+        _advertisementAnalysisButton.Enabled = !busy && CanUseAdvertisementAnalysis;
         _settingsButton.Enabled = !busy;
+        _excelExportButton.Enabled = !busy && _results.Count > 0;
         _groupId.Enabled = !busy;
         _saveGroupId.Enabled = !busy;
         _grid.Enabled = true;
@@ -1814,6 +2767,37 @@ public sealed class MainForm : Form
         if (string.IsNullOrWhiteSpace(result.SameAddressMinPrice) && string.IsNullOrWhiteSpace(result.SameAddressMaxPrice))
             return "정상";
         return $"가격 {result.SameAddressMinPrice} ~ {result.SameAddressMaxPrice}";
+    }
+
+    private static string PropertyTypeDisplay(Listing listing)
+    {
+        if (!string.IsNullOrWhiteSpace(listing.RealEstateType)) return listing.RealEstateType;
+        return listing.ArticleName switch
+        {
+            "아파트" or "오피스텔" or "빌라" or "연립" or "다세대" or "단독주택" or
+                "다가구주택" or "원룸" or "상가" or "사무실" or "공장" or "창고" or
+                "토지" or "분양권" or "재개발" or "재건축" => listing.ArticleName,
+            _ => "-"
+        };
+    }
+
+    private static string ListingNameDisplay(Listing listing)
+    {
+        if (string.IsNullOrWhiteSpace(listing.Address))
+            return string.Join(" · ", new[] { listing.Location, listing.ArticleName, listing.BuildingName }
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Distinct(StringComparer.Ordinal));
+        if (string.IsNullOrWhiteSpace(listing.Description)) return listing.Address;
+
+        // 이전 버전 캐시의 Address에는 설명이 합쳐져 있으므로 화면 표시 시 정확히 분리한다.
+        return string.Join(" · ", listing.Address
+            .Split(" · ", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(part => !string.Equals(part, listing.Description, StringComparison.Ordinal)));
+    }
+
+    private string PropertyAnalysisDisplay(Listing listing)
+    {
+        return "분석";
     }
 
     private static string JoinDetails(Listing listing) =>

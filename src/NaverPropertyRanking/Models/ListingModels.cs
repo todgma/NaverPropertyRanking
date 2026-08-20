@@ -15,7 +15,12 @@ public sealed record Listing(
 {
     public string ComplexNo { get; init; } = string.Empty;
     public string ArticleName { get; init; } = string.Empty;
+    public string RealEstateType { get; init; } = string.Empty;
+    public string Location { get; init; } = string.Empty;
     public string Description { get; init; } = string.Empty;
+    public string RegisteredDate { get; init; } = string.Empty;
+    public string VerificationTypeCode { get; init; } = string.Empty;
+    public int SameAddressCount { get; init; }
 }
 
 public sealed record RankingResult(

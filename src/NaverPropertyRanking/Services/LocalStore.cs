@@ -39,6 +39,8 @@ public sealed class LocalStore
             settings.CookieHeader = DataProtection.Unprotect(settings.EncryptedCookieHeader);
             settings.LoginToken = DataProtection.Unprotect(settings.EncryptedLoginToken);
             settings.Notices ??= [];
+            settings.GridColumnOrder ??= [];
+            settings.PollIntervalMinutes = AppSettings.NormalizePollInterval(settings.PollIntervalMinutes);
             return settings;
         }
         catch
@@ -51,6 +53,7 @@ public sealed class LocalStore
     {
         Directory.CreateDirectory(_directory);
         var persisted = settings.Clone();
+        persisted.PollIntervalMinutes = AppSettings.NormalizePollInterval(persisted.PollIntervalMinutes);
         if (!persisted.SaveGroupId) persisted.GroupId = string.Empty;
         if (persisted.SaveCredentials)
         {
@@ -111,6 +114,29 @@ public sealed class LocalStore
             RankingResults = entry.RankingResults.ToList()
         });
 
+        SaveListingCaches(entries);
+    }
+
+    public void RemoveListingCache(string loginId, string groupId)
+    {
+        if (string.IsNullOrWhiteSpace(loginId) || string.IsNullOrWhiteSpace(groupId)) return;
+        var entries = LoadListingCaches();
+        var removed = entries.RemoveAll(existing =>
+            string.Equals(existing.LoginId, loginId.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(existing.GroupId, groupId.Trim(), StringComparison.OrdinalIgnoreCase));
+        if (removed == 0) return;
+        if (entries.Count == 0)
+        {
+            if (File.Exists(_listingCachePath)) File.Delete(_listingCachePath);
+            return;
+        }
+
+        SaveListingCaches(entries);
+    }
+
+    private void SaveListingCaches(IReadOnlyList<ListingCacheEntry> entries)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(_listingCachePath)!);
         var temporaryPath = _listingCachePath + ".tmp";
         var json = JsonSerializer.Serialize(entries, JsonOptions);
         File.WriteAllText(temporaryPath, DataProtection.Protect(json));

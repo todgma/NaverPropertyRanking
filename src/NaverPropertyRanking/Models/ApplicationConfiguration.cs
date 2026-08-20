@@ -52,6 +52,42 @@ public sealed class ApiConfiguration
             ["index"] = "1"
         }
     };
+    public ApiEndpointConfiguration ArticleDetail { get; set; } = new()
+    {
+        Endpoint = "/api/articles/{articleNo}"
+    };
+    public ApiEndpointConfiguration ComplexDetail { get; set; } = new()
+    {
+        Endpoint = "/api/complexes/{complexNo}"
+    };
+    /// <summary>
+    /// 단지별 광고 상위 매물(중개인) 조회 API. 엔드포인트가 http(s)로 시작하면
+    /// BaseUrl 대신 해당 절대 주소로 호출한다(fin.land.naver.com).
+    /// </summary>
+    public ApiEndpointConfiguration RealtorAdvertisement { get; set; } = new()
+    {
+        Endpoint = "https://fin.land.naver.com/front-api/v1/realtor/advertisement",
+        Params = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["advertisementRerankChannelType"] = "property.complex.price",
+            ["tradeTypes[]"] = "A1"
+        }
+    };
+    public ApiEndpointConfiguration ComplexAdvertising { get; set; } = new()
+    {
+        Endpoint = "/api/articles/complex/{complexNo}",
+        Params = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["realEstateType"] = "APT:ABYG:JGC:PRE",
+            ["tradeType"] = string.Empty,
+            ["priceType"] = "RETAIL",
+            ["page"] = "1",
+            ["order"] = "rank",
+            ["showArticle"] = "false",
+            ["sameAddressGroup"] = "false",
+            ["type"] = "list"
+        }
+    };
 }
 
 public sealed class ApiEndpointConfiguration

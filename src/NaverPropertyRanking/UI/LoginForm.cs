@@ -28,7 +28,7 @@ public sealed partial class LoginForm : Form
     public LoginForm(GoogleAuthenticationClient client, string lastLoginId)
     {
         _client = client;
-        Text = "네이버 매물 순위 로그인";
+        Text = "매물분석알림 로그인";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -58,7 +58,7 @@ public sealed partial class LoginForm : Form
     {
         var title = new Label
         {
-            Text = "네이버 매물 순위",
+            Text = "매물분석알림",
             Dock = DockStyle.Top,
             Height = 62,
             Padding = new Padding(18, 16, 18, 0),
@@ -81,13 +81,13 @@ public sealed partial class LoginForm : Form
         var layout = BuildFieldLayout();
         AddField(layout, 0, "아이디", _loginId);
         AddField(layout, 1, "패스워드", _loginPassword);
-        layout.Controls.Add(new Label
-        {
-            Text = "로그인 시 현재 PC가 등록되고 로그인 이력이 기록됩니다.",
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-            Margin = new Padding(3, 9, 3, 6)
-        }, 1, 2);
+        //layout.Controls.Add(new Label
+        //{
+        //    Text = "로그인 시 현재 PC가 등록되고 로그인 이력이 기록됩니다.",
+        //    AutoSize = true,
+        //    ForeColor = Color.DimGray,
+        //    Margin = new Padding(3, 9, 3, 6)
+        //}, 1, 2);
         layout.Controls.Add(_loginButton, 1, 3);
         page.Controls.Add(layout);
         return page;

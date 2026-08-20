@@ -9,7 +9,8 @@ public sealed record AuthenticationSession(
     DateTime? MembershipEnd,
     int AllowedPcCount,
     int CurrentPcCount,
-    IReadOnlyList<string> Notices);
+    IReadOnlyList<string> Notices,
+    int Grade = 1);
 
 public sealed record AuthenticationResult(
     bool Success,

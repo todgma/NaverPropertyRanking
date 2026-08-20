@@ -20,7 +20,7 @@ internal static class Program
             if (!isFirstInstance)
             {
                 MessageBox.Show(
-                    "네이버 매물 순위가 이미 실행 중입니다.\n시스템 트레이를 확인해 주세요.",
+                    "매물분석알림이 이미 실행 중입니다.\n시스템 트레이를 확인해 주세요.",
                     "이미 실행 중",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -64,7 +64,8 @@ internal static class Program
                     applicationConfiguration.Api,
                     authenticationSession,
                     authenticationClient,
-                    applicationConfiguration.GoogleAuthentication));
+                    applicationConfiguration.GoogleAuthentication,
+                    applicationConfiguration.Update.CurrentVersion));
             }
             finally
             {

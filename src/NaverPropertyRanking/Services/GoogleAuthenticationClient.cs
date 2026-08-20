@@ -171,7 +171,8 @@ public sealed class GoogleAuthenticationClient : IDisposable
                 ParseDate(apiResponse.MembershipEnd),
                 apiResponse.AllowedPcCount,
                 apiResponse.CurrentPcCount,
-                notices);
+                notices,
+                apiResponse.Grade > 0 ? apiResponse.Grade : 1);
             if (string.IsNullOrWhiteSpace(session.Token) || string.IsNullOrWhiteSpace(session.SessionId))
                 return new AuthenticationResult(false, "로그인 서버가 세션 정보를 반환하지 않았습니다. Code.gs를 새 버전으로 배포하세요.",
                     Code: "MISSING_SESSION");
@@ -254,6 +255,7 @@ public sealed class GoogleAuthenticationClient : IDisposable
         public string? MembershipEnd { get; set; }
         public int AllowedPcCount { get; set; }
         public int CurrentPcCount { get; set; }
+        public int Grade { get; set; } = 1;
         public List<string>? Notices { get; set; }
     }
 }

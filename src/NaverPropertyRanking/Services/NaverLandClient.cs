@@ -15,6 +15,9 @@ public sealed class NaverLandClient : IDisposable
     private readonly ApiConfiguration _apiConfiguration;
     private readonly RequestThrottle _listingThrottle = new();
     private readonly RequestThrottle _rankingThrottle = new();
+    private readonly RequestThrottle _articleDetailThrottle = new();
+    private readonly RequestThrottle _complexDetailThrottle = new();
+    private readonly RequestThrottle _advertisingThrottle = new();
     private readonly SemaphoreSlim _rankingConcurrency = new(5, 5);
 
     public NaverLandClient(HttpMessageHandler? handler = null)
@@ -117,6 +120,190 @@ public sealed class NaverLandClient : IDisposable
         }
     }
 
+    public async Task<IReadOnlyList<AdvertisedRealtor>> GetComplexAdvertisingRealtorsAsync(
+        string complexNo,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(complexNo)) return [];
+        var normalizedComplexNo = complexNo.Trim();
+        var profile = _apiConfiguration.ComplexAdvertising;
+        var headerProfile = profile.Headers.Count > 0 ? profile : _apiConfiguration.Ranking;
+        var endpoint = profile.Endpoint.Replace(
+            "{complexNo}",
+            Uri.EscapeDataString(normalizedComplexNo),
+            StringComparison.OrdinalIgnoreCase);
+        var listings = new List<Listing>();
+
+        const int maximumPages = 10;
+        for (var page = 1; page <= maximumPages; page++)
+        {
+            var path = BuildPath(
+                profile,
+                new Dictionary<string, string>
+                {
+                    ["complexNo"] = normalizedComplexNo,
+                    ["page"] = page.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                },
+                endpoint);
+            var json = await GetStringAsync(
+                    path,
+                    headerProfile,
+                    settings,
+                    _advertisingThrottle,
+                    ListingRequestInterval,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var parsed = NaverResponseParser.ParseArticleResponse(json);
+            listings.AddRange(parsed.Listings);
+            var selected = AdvertisementAnalysisService.SelectTopRealtors(listings);
+            if (selected.Count >= 3 || parsed.Listings.Count == 0 || parsed.IsMoreData == false)
+                return selected;
+        }
+
+        return AdvertisementAnalysisService.SelectTopRealtors(listings);
+    }
+
+    /// <summary>
+    /// 단지 광고 API(front-api/v1/realtor/advertisement)를 호출해
+    /// 광고 상위 매물의 중개인 정보를 순위순으로 최대 3명 조회한다. 실패 시 빈 목록을 반환한다.
+    /// </summary>
+    public async Task<IReadOnlyList<ComplexAdvertisementRealtor>> GetComplexAdvertisementRealtorsAsync(
+        string complexNo,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(complexNo)) return [];
+
+        var normalizedComplexNo = complexNo.Trim();
+        var profile = _apiConfiguration.RealtorAdvertisement;
+        if (string.IsNullOrWhiteSpace(profile.Endpoint)) return [];
+        var headerProfile = profile.Headers.Count > 0
+            ? profile
+            : _apiConfiguration.RealtorArticleList.Headers.Count > 0
+                ? _apiConfiguration.RealtorArticleList
+                : _apiConfiguration.Ranking;
+        var endpoint = profile.Endpoint.Replace(
+            "{complexNo}",
+            Uri.EscapeDataString(normalizedComplexNo),
+            StringComparison.OrdinalIgnoreCase);
+        var path = BuildPath(
+            profile,
+            new Dictionary<string, string> { ["complexNumber"] = normalizedComplexNo },
+            endpoint);
+        try
+        {
+            var json = await GetStringAsync(
+                    path,
+                    headerProfile,
+                    settings,
+                    _advertisingThrottle,
+                    ListingRequestInterval,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return NaverResponseParser.ParseAdvertisementRealtors(json);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// 단지 정보 API(/api/complexes/{complexNo})를 호출해 세대수·층수·사용승인일 등
+    /// 단지 기본 정보를 조회한다. 실패 시 Error가 채워진 결과를 반환한다.
+    /// </summary>
+    public async Task<ComplexInformation> GetComplexInformationAsync(
+        string complexNo,
+        string fallbackName,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(complexNo))
+            return new ComplexInformation(string.Empty, fallbackName) { Error = "단지번호 없음" };
+
+        var normalizedComplexNo = complexNo.Trim();
+        var profile = _apiConfiguration.ComplexDetail;
+        var headerProfile = profile.Headers.Count > 0
+            ? profile
+            : _apiConfiguration.RealtorArticleList.Headers.Count > 0
+                ? _apiConfiguration.RealtorArticleList
+                : _apiConfiguration.Ranking;
+        var endpoint = profile.Endpoint.Replace(
+            "{complexNo}",
+            Uri.EscapeDataString(normalizedComplexNo),
+            StringComparison.OrdinalIgnoreCase);
+        var path = profile.Params.Count > 0
+            ? BuildPath(profile, new Dictionary<string, string>(), endpoint)
+            : endpoint;
+        try
+        {
+            var json = await GetStringAsync(
+                    path,
+                    headerProfile,
+                    settings,
+                    _complexDetailThrottle,
+                    ListingRequestInterval,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return NaverResponseParser.ParseComplexInformation(json, normalizedComplexNo, fallbackName);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return new ComplexInformation(normalizedComplexNo, fallbackName) { Error = ex.Message };
+        }
+    }
+
+    public async Task<Listing> HydrateComplexIdentityAsync(
+        Listing listing,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(listing.ComplexNo) || string.IsNullOrWhiteSpace(listing.ArticleNo))
+            return listing;
+
+        var detail = await GetArticleComparisonDetailAsync(listing, settings, cancellationToken)
+            .ConfigureAwait(false);
+        return detail.Listing;
+    }
+
+    public async Task<ArticleComparisonDetail> GetArticleComparisonDetailAsync(
+        Listing listing,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(listing.ArticleNo))
+            return new ArticleComparisonDetail(listing) { Error = "매물번호 없음" };
+
+        var profile = _apiConfiguration.ArticleDetail;
+        var headerProfile = profile.Headers.Count > 0
+            ? profile
+            : _apiConfiguration.RealtorArticleList.Headers.Count > 0
+                ? _apiConfiguration.RealtorArticleList
+                : _apiConfiguration.Ranking;
+        var endpoint = profile.Endpoint.Replace(
+            "{articleNo}",
+            Uri.EscapeDataString(listing.ArticleNo.Trim()),
+            StringComparison.OrdinalIgnoreCase);
+        var json = await GetStringAsync(
+                endpoint,
+                headerProfile,
+                settings,
+                _articleDetailThrottle,
+                ListingRequestInterval,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return NaverResponseParser.ParseArticleComparisonDetail(json, listing);
+    }
+
     private async Task<RankingResult> GetRankingCoreAsync(
         Listing ownListing,
         ISet<string> ownArticleNumbers,
@@ -143,9 +330,21 @@ public sealed class NaverLandClient : IDisposable
                 .Select((listing, index) => new { listing.ArticleNo, Rank = index + 1 })
                 .FirstOrDefault(x => x.ArticleNo == ownListing.ArticleNo)?.Rank;
             var hydratedOwn = parsed.Listings.FirstOrDefault(x => x.ArticleNo == ownListing.ArticleNo);
+            var resultOwnListing = hydratedOwn is null
+                ? ownListing
+                : hydratedOwn with
+                {
+                    IsMine = true,
+                    ComplexNo = string.IsNullOrWhiteSpace(hydratedOwn.ComplexNo)
+                        ? ownListing.ComplexNo
+                        : hydratedOwn.ComplexNo,
+                    ArticleName = string.IsNullOrWhiteSpace(hydratedOwn.ArticleName)
+                        ? ownListing.ArticleName
+                        : hydratedOwn.ArticleName
+                };
 
             return new RankingResult(
-                hydratedOwn is null ? ownListing : hydratedOwn with { IsMine = true },
+                resultOwnListing,
                 rank,
                 parsed.Listings.Count,
                 prices.MinPrice,
@@ -194,8 +393,12 @@ public sealed class NaverLandClient : IDisposable
             throttle.Gate.Release();
         }
 
-        var baseUrl = _apiConfiguration.BaseUrl.TrimEnd('/');
-        using var request = new HttpRequestMessage(HttpMethod.Get, baseUrl + path);
+        // 엔드포인트가 절대 주소면(BaseUrl과 다른 호스트, 예: fin.land.naver.com) 그대로 사용한다.
+        var requestUrl = path.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                         path.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+            ? path
+            : _apiConfiguration.BaseUrl.TrimEnd('/') + path;
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
         ApplyConfiguredHeaders(request, endpointConfiguration);
 
         HttpResponseMessage response;
@@ -254,13 +457,14 @@ public sealed class NaverLandClient : IDisposable
 
     private static string BuildPath(
         ApiEndpointConfiguration profile,
-        IReadOnlyDictionary<string, string> overrides)
+        IReadOnlyDictionary<string, string> overrides,
+        string? endpoint = null)
     {
         var parameters = new Dictionary<string, string>(profile.Params, StringComparer.OrdinalIgnoreCase);
         foreach (var pair in overrides) parameters[pair.Key] = pair.Value;
         var query = string.Join("&", parameters.Select(pair =>
             $"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value ?? string.Empty)}"));
-        return $"{profile.Endpoint}?{query}";
+        return $"{endpoint ?? profile.Endpoint}?{query}";
     }
 
     private void ApplyConfiguredHeaders(HttpRequestMessage request, ApiEndpointConfiguration profile)
@@ -338,6 +542,9 @@ public sealed class NaverLandClient : IDisposable
     {
         _listingThrottle.Dispose();
         _rankingThrottle.Dispose();
+        _articleDetailThrottle.Dispose();
+        _complexDetailThrottle.Dispose();
+        _advertisingThrottle.Dispose();
         _rankingConcurrency.Dispose();
         _httpClient.Dispose();
     }

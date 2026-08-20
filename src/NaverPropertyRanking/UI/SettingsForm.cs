@@ -4,20 +4,36 @@ namespace NaverPropertyRanking.UI;
 
 public sealed class SettingsForm : Form
 {
-    private readonly NumericUpDown _pollMinutes = new() { Minimum = 2, Maximum = 1440, Width = 90 };
+    private readonly NumericUpDown _pollMinutes = new()
+    {
+        Minimum = AppSettings.MinimumPollIntervalMinutes,
+        Maximum = AppSettings.MaximumPollIntervalMinutes,
+        Width = 90
+    };
     private readonly CheckBox _autoRefresh = new() { Text = "자동 조회 사용", AutoSize = true };
+    private readonly CheckBox _popupNotifications = new()
+    {
+        Text = "팝업 알림 사용 (미사용 시 랭킹, 가격 조회만 실행)",
+        AutoSize = true
+    };
     private readonly CheckBox _rankChange = new() { Text = "모든 랭킹 변경 알림", AutoSize = true };
     private readonly CheckBox _rankThreshold = new() { Text = "랭킹 숫자가 기준 이상(순위 하락)일 때 알림", AutoSize = true };
     private readonly NumericUpDown _threshold = new() { Minimum = 1, Maximum = 9999, Width = 90 };
     private readonly CheckBox _priceChange = new() { Text = "타 중개사 동일매물 가격 변경 알림", AutoSize = true };
     private readonly CheckBox _newDuplicate = new() { Text = "내 단독매물에 동일매물이 생길 때 알림", AutoSize = true };
+    private readonly CheckBox _propertyAnalysis = new()
+    {
+        Name = "PropertyAnalysisToggle",
+        Text = "매물분석",
+        AutoSize = true
+    };
 
     public SettingsForm(AppSettings current)
     {
         Text = "조회 및 알림 설정";
         StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(680, 500);
-        Size = new Size(760, 540);
+        MinimumSize = new Size(680, 580);
+        Size = new Size(760, 620);
         Font = new Font("맑은 고딕", 9F);
         BackColor = Color.White;
 
@@ -45,22 +61,18 @@ public sealed class SettingsForm : Form
         AddRow(root, ref row, "조회 간격(분)", _pollMinutes);
         AddRow(root, ref row, string.Empty, _autoRefresh);
 
+        AddSeparator(root, ref row);
         AddSection(root, ref row, "알림 조건");
-        AddRow(root, ref row, string.Empty, _rankChange);
-        AddRow(root, ref row, string.Empty, _rankThreshold);
-        AddRow(root, ref row, "랭킹 기준", _threshold);
+        AddRow(root, ref row, "팝업 표시", _popupNotifications);
+        AddRow(root, ref row, "알림 선택", _rankChange);
         AddRow(root, ref row, string.Empty, _priceChange);
         AddRow(root, ref row, string.Empty, _newDuplicate);
+        AddRow(root, ref row, string.Empty, _rankThreshold);
+        AddRow(root, ref row, "랭킹 기준", _threshold);
 
-        var credentialHelp = new Label
-        {
-            Text = "중개인 목록 API와 랭킹 API의 인증 헤더는 실행 파일 옆 appsettings.json에서 각각 관리합니다.",
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-            MaximumSize = new Size(500, 0)
-        };
-        AddSection(root, ref row, "API 인증");
-        AddRow(root, ref row, string.Empty, credentialHelp, 42);
+        AddSeparator(root, ref row);
+        AddSection(root, ref row, "매물분석");
+        AddRow(root, ref row, "분석설정", _propertyAnalysis);
 
         var buttons = new FlowLayoutPanel
         {
@@ -85,13 +97,15 @@ public sealed class SettingsForm : Form
 
     private void LoadValues(AppSettings settings)
     {
-        _pollMinutes.Value = Math.Clamp(settings.PollIntervalMinutes, 2, 1440);
+        _pollMinutes.Value = AppSettings.NormalizePollInterval(settings.PollIntervalMinutes);
         _autoRefresh.Checked = settings.AutoRefresh;
+        _popupNotifications.Checked = settings.PopupNotificationsEnabled;
         _rankChange.Checked = settings.NotifyEveryRankChange;
         _rankThreshold.Checked = settings.NotifyRankThreshold;
         _threshold.Value = Math.Clamp(settings.RankThreshold, 1, 9999);
         _priceChange.Checked = settings.NotifyCompetitorPriceChange;
         _newDuplicate.Checked = settings.NotifyNewDuplicate;
+        _propertyAnalysis.Checked = settings.PropertyAnalysisEnabled;
     }
 
     private void SaveAndClose()
@@ -99,11 +113,13 @@ public sealed class SettingsForm : Form
         EditedSettings.PollIntervalMinutes = (int)_pollMinutes.Value;
         EditedSettings.AutoRefresh = _autoRefresh.Checked;
         EditedSettings.StartMinimized = false;
+        EditedSettings.PopupNotificationsEnabled = _popupNotifications.Checked;
         EditedSettings.NotifyEveryRankChange = _rankChange.Checked;
         EditedSettings.NotifyRankThreshold = _rankThreshold.Checked;
         EditedSettings.RankThreshold = (int)_threshold.Value;
         EditedSettings.NotifyCompetitorPriceChange = _priceChange.Checked;
         EditedSettings.NotifyNewDuplicate = _newDuplicate.Checked;
+        EditedSettings.PropertyAnalysisEnabled = _propertyAnalysis.Checked;
         DialogResult = DialogResult.OK;
         Close();
     }
@@ -122,6 +138,21 @@ public sealed class SettingsForm : Form
         };
         root.Controls.Add(label, 0, row);
         root.SetColumnSpan(label, 2);
+        row++;
+    }
+
+    private static void AddSeparator(TableLayoutPanel root, ref int row)
+    {
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 17));
+        var separator = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Height = 1,
+            BackColor = Color.FromArgb(218, 226, 223),
+            Margin = new Padding(0, 8, 0, 8)
+        };
+        root.Controls.Add(separator, 0, row);
+        root.SetColumnSpan(separator, 2);
         row++;
     }
 
