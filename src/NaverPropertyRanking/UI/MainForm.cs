@@ -6,6 +6,16 @@ using NaverPropertyRanking.Services;
 
 namespace NaverPropertyRanking.UI;
 
+/// <summary>중단 가능한 조회 작업의 종류. 어느 버튼이 조회중단으로 바뀔지 결정한다.</summary>
+public enum CancellableOperationKind
+{
+    None,
+    /// <summary>매물동기화 버튼(자동 주기 조회 포함).</summary>
+    ListingSync,
+    /// <summary>순위조회 버튼(현재 페이지·실패 재조회 포함).</summary>
+    RankingRefresh
+}
+
 public sealed class MainForm : Form
 {
     private readonly LocalStore _store;
@@ -18,8 +28,11 @@ public sealed class MainForm : Form
     private readonly TextBox _groupId = new() { Width = 150, PlaceholderText = "네이버 부동산 단체 ID" };
     private readonly TextBox _articleNumbers = new() { Width = 150, PlaceholderText = "예: 2612345678, 2612345679" };
     private readonly CheckBox _saveGroupId = new() { Text = "저장", AutoSize = true, Checked = true, Padding = new Padding(0, 6, 0, 0), Visible = false };
-    private readonly Button _loadButton = new() { Text = "매물동기화", Width = 125, Height = 32 };
-    private readonly Button _refreshButton = new() { Text = "순위조회", Width = 100, Height = 32, Enabled = false };
+    private const string LoadButtonDefaultText = "매물동기화";
+    private const string RefreshButtonDefaultText = "순위조회";
+    private const string CancelOperationButtonText = "조회중단";
+    private readonly Button _loadButton = new() { Text = LoadButtonDefaultText, Width = 125, Height = 32 };
+    private readonly Button _refreshButton = new() { Text = RefreshButtonDefaultText, Width = 100, Height = 32, Enabled = false };
     private readonly Button _retryFailedRankingsButton = new()
     {
         Text = "실패 재조회",
@@ -55,6 +68,17 @@ public sealed class MainForm : Form
             MouseOverBackColor = Color.FromArgb(12, 145, 72),
             MouseDownBackColor = Color.FromArgb(9, 101, 52)
         }
+    };
+    /// <summary>검색조건과 Excel 출력 버튼 사이에 표시하는 진행 상태(볼드).</summary>
+    private readonly Label _progressStatus = new()
+    {
+        Dock = DockStyle.Fill,
+        AutoSize = false,
+        AutoEllipsis = true,
+        TextAlign = ContentAlignment.MiddleRight,
+        Font = new Font("맑은 고딕", 9F, FontStyle.Bold),
+        ForeColor = Color.FromArgb(16, 124, 65),
+        Margin = new Padding(8, 0, 8, 0)
     };
     private readonly Button _previousPageButton = new() { Text = "◀ 이전", Width = 90, Height = 30 };
     private readonly Button _nextPageButton = new() { Text = "다음 ▶", Width = 90, Height = 30 };
@@ -93,6 +117,11 @@ public sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _cooldownUiTimer = new() { Interval = 10_000 };
     private readonly System.Windows.Forms.Timer _noticeRotationTimer = new() { Interval = 60_000 };
     private readonly CancellationTokenSource _lifetime = new();
+    /// <summary>진행 중인 조회 작업 취소용. 작업 시작 시 만들고 종료 시 정리한다.</summary>
+    private CancellationTokenSource? _operationCancellation;
+    private bool _operationCancelledByUser;
+    /// <summary>진행 중인 작업을 시작한 버튼. 해당 버튼만 조회중단으로 바뀐다.</summary>
+    private CancellableOperationKind _operationKind = CancellableOperationKind.None;
     private readonly HashSet<string> _expanded = [];
     private readonly HashSet<string> _propertyAnalysisInProgress = [];
     private readonly HashSet<string> _failedRankingArticleNumbers = [];
@@ -333,19 +362,23 @@ public sealed class MainForm : Form
         {
             Dock = DockStyle.Top,
             Height = 42,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
             BackColor = Color.FromArgb(247, 250, 249)
         };
+        // 검색조건은 내용 크기만큼, 남는 공간은 진행 상태 표시에 사용한다.
+        container.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         container.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         container.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 128));
         container.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         var optionsPanel = new FlowLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Left,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = false,
             Padding = new Padding(12, 8, 0, 0),
@@ -384,7 +417,8 @@ public sealed class MainForm : Form
         _excelExportButton.Anchor = AnchorStyles.None;
         _excelExportButton.Margin = new Padding(6, 6, 10, 6);
         container.Controls.Add(optionsPanel, 0, 0);
-        container.Controls.Add(_excelExportButton, 1, 0);
+        container.Controls.Add(_progressStatus, 1, 0);
+        container.Controls.Add(_excelExportButton, 2, 0);
         return container;
     }
 
@@ -564,8 +598,27 @@ public sealed class MainForm : Form
 
     private void WireEvents()
     {
-        _loadButton.Click += async (_, _) => await StartListingWorkflowAsync();
-        _refreshButton.Click += async (_, _) => await RefreshAllRankingsAsync(false);
+        // 자기 버튼으로 시작한 작업이 진행 중일 때만 조회중단으로 동작한다.
+        _loadButton.Click += async (_, _) =>
+        {
+            if (_operationKind == CancellableOperationKind.ListingSync)
+            {
+                CancelCurrentOperation();
+                return;
+            }
+            if (_operationCancellation is not null) return;
+            await StartListingWorkflowAsync();
+        };
+        _refreshButton.Click += async (_, _) =>
+        {
+            if (_operationKind == CancellableOperationKind.RankingRefresh)
+            {
+                CancelCurrentOperation();
+                return;
+            }
+            if (_operationCancellation is not null) return;
+            await RefreshAllRankingsAsync(false);
+        };
         _retryFailedRankingsButton.Click += async (_, _) => await RetryFailedRankingsAsync();
         _advertisementAnalysisButton.Click += async (_, _) => await ShowOwnedComplexListPopupAsync();
         _settingsButton.Click += (_, _) => OpenSettings();
@@ -721,6 +774,7 @@ public sealed class MainForm : Form
         }
 
         _refreshing = true;
+        BeginCancellableOperation(CancellableOperationKind.ListingSync);
         SetListingLoadBusy(true);
         SetStatus("내 매물 목록을 불러오는 중...");
         try
@@ -752,7 +806,7 @@ public sealed class MainForm : Form
                 SetStatus($"매물 목록 {progress.ListingCount}건 수집 중 · {progress.Page}페이지"));
             var loadedListings = await _apiClient.GetOwnListingsAsync(
                 _settings,
-                _lifetime.Token,
+                OperationToken,
                 listingProgress);
             _ownListings = loadedListings
                 .GroupBy(listing => listing.ArticleNo, StringComparer.Ordinal)
@@ -795,9 +849,10 @@ public sealed class MainForm : Form
                 rankingSummary.Events);
             EnsureAutoRetryFailedRankingsLoop();
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (NaverApiException ex)
         {
@@ -820,6 +875,7 @@ public sealed class MainForm : Form
         finally
         {
             _refreshing = false;
+            EndCancellableOperation();
             SetListingLoadBusy(false);
         }
     }
@@ -853,14 +909,16 @@ public sealed class MainForm : Form
         }
 
         _refreshing = true;
+        BeginCancellableOperation(CancellableOperationKind.RankingRefresh);
         SetBusy(true);
         try
         {
             await RankCurrentPageCoreAsync(forceRefresh);
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (Exception ex)
         {
@@ -870,6 +928,7 @@ public sealed class MainForm : Form
         finally
         {
             _refreshing = false;
+            EndCancellableOperation();
             SetBusy(false);
         }
     }
@@ -905,14 +964,16 @@ public sealed class MainForm : Form
         var scope = $"전체 {_ownListings.Count}건";
 
         _refreshing = true;
+        BeginCancellableOperation(CancellableOperationKind.RankingRefresh);
         SetBusy(true);
         try
         {
             await RankListingsCoreAsync(_ownListings, true, scope);
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (Exception ex)
         {
@@ -922,6 +983,7 @@ public sealed class MainForm : Form
         finally
         {
             _refreshing = false;
+            EndCancellableOperation();
             SetBusy(false);
         }
     }
@@ -954,6 +1016,7 @@ public sealed class MainForm : Form
         }
 
         _refreshing = true;
+        BeginCancellableOperation(CancellableOperationKind.RankingRefresh);
         SetBusy(true);
         try
         {
@@ -964,9 +1027,10 @@ public sealed class MainForm : Form
             SetStatus($"완료: {scope} · 성공 {summary.SuccessCount}건 / 실패 {summary.FailureCount}건 · 남은 실패 {remainingFailures}건");
             ShowRankingCompletionPopup(scope, summary.SuccessCount, summary.FailureCount, summary.Events);
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (Exception ex)
         {
@@ -976,6 +1040,7 @@ public sealed class MainForm : Form
         finally
         {
             _refreshing = false;
+            EndCancellableOperation();
             SetBusy(false);
         }
     }
@@ -1026,18 +1091,30 @@ public sealed class MainForm : Form
 
                 attempt++;
                 RankingBatchSummary summary;
+                var cancelledByUser = false;
                 _refreshing = true;
+                BeginCancellableOperation(CancellableOperationKind.RankingRefresh);
                 SetBusy(true);
                 try
                 {
                     var scope = $"실패 매물 자동 재조회 {attempt}회차 {targets.Count}건";
                     summary = await RankListingsCoreAsync(targets, true, scope, false);
                 }
+                catch (OperationCanceledException)
+                {
+                    HandleOperationCancelled();
+                    return;
+                }
                 finally
                 {
                     _refreshing = false;
+                    cancelledByUser = _operationCancelledByUser;
+                    EndCancellableOperation();
                     SetBusy(false);
                 }
+
+                // 사용자가 조회중단을 누르면 자동 재조회 반복도 멈춘다.
+                if (cancelledByUser) return;
 
                 var stillFailing = _failedRankingArticleNumbers.Count(articleNo =>
                     _ownListings.Any(listing => listing.ArticleNo == articleNo));
@@ -1141,10 +1218,15 @@ public sealed class MainForm : Form
         var runningRequests = new Dictionary<Task<RankingResult>, Listing>();
         var previousRanks = new Dictionary<string, int?>(StringComparer.Ordinal);
         var stopLaunching = false;
+        var operationToken = OperationToken;
 
         void LaunchAvailableRequests()
         {
-            while (!stopLaunching && runningRequests.Count < 5 && pendingListings.Count > 0)
+            // 조회중단을 누르면 남은 매물은 더 이상 요청하지 않는다.
+            while (!stopLaunching &&
+                   !operationToken.IsCancellationRequested &&
+                   runningRequests.Count < 5 &&
+                   pendingListings.Count > 0)
             {
                 var listing = pendingListings.Dequeue();
                 int? previousRank = null;
@@ -1156,7 +1238,7 @@ public sealed class MainForm : Form
                 previousRanks[listing.ArticleNo] = previousRank;
                 if (_settings.PropertyAnalysisEnabled)
                     _propertyAnalysisInProgress.Add(listing.ArticleNo);
-                var request = _apiClient.GetRankingAsync(listing, ownNumbers, _settings, _lifetime.Token);
+                var request = _apiClient.GetRankingAsync(listing, ownNumbers, _settings, OperationToken);
                 runningRequests.Add(request, listing);
             }
         }
@@ -1176,9 +1258,19 @@ public sealed class MainForm : Form
                 var listing = runningRequests[completedTask];
                 runningRequests.Remove(completedTask);
                 _propertyAnalysisInProgress.Remove(listing.ArticleNo);
+                RankingResult completedResult;
+                try
+                {
+                    completedResult = await completedTask;
+                }
+                catch (OperationCanceledException)
+                {
+                    // 조회중단으로 취소된 요청은 성공·실패 어느 쪽으로도 집계하지 않는다.
+                    continue;
+                }
                 completedCount++;
                 lastCompletedArticleNo = listing.ArticleNo;
-                var result = (await completedTask) with
+                var result = completedResult with
                 {
                     PreviousRank = previousRanks[listing.ArticleNo]
                 };
@@ -1206,6 +1298,19 @@ public sealed class MainForm : Form
 
         foreach (var listing in targetListings)
             _propertyAnalysisInProgress.Remove(listing.ArticleNo);
+
+        if (operationToken.IsCancellationRequested)
+        {
+            // 중단 시점까지 받은 결과는 저장하되, 남은 매물은 실패로 기록하지 않는다.
+            // 실패로 남기면 자동 재조회가 다시 돌면서 중단 의도를 무시하게 된다.
+            UpdateCurrentPageResults("랭킹 미조회");
+            _store.SaveSnapshots(_snapshots);
+            _store.SaveSettings(_settings);
+            UpdateRetryFailedRankingsButton();
+            RenderGrid();
+            SaveCurrentListingCache();
+            throw new OperationCanceledException(operationToken);
+        }
 
         var attemptedResultsByArticleNo = attemptedResults
             .GroupBy(result => result.OwnListing.ArticleNo, StringComparer.Ordinal)
@@ -1309,6 +1414,7 @@ public sealed class MainForm : Form
     private async Task SynchronizeDisplayedListingsAsync(bool isAutomatic)
     {
         _refreshing = true;
+        BeginCancellableOperation(CancellableOperationKind.ListingSync);
         SetListingLoadBusy(true);
         SetStatus($"현재 매물 {_ownListings.Count}건을 기준으로 최신 매물목록을 다시 조회합니다.");
 
@@ -1319,7 +1425,7 @@ public sealed class MainForm : Form
                 SetStatus($"매물목록 재조회 중 · 최신 목록 {progress.ListingCount}건 · {progress.Page}페이지"));
             var latestListings = await _apiClient.GetOwnListingsAsync(
                 _settings,
-                _lifetime.Token,
+                OperationToken,
                 listingProgress);
 
             var reconciliation = ListingCollectionMerger.Reconcile(_ownListings, latestListings);
@@ -1376,9 +1482,10 @@ public sealed class MainForm : Form
                 rankingSummary.Events);
             EnsureAutoRetryFailedRankingsLoop();
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (NaverApiException ex)
         {
@@ -1404,6 +1511,7 @@ public sealed class MainForm : Form
         finally
         {
             _refreshing = false;
+            EndCancellableOperation();
             SetListingLoadBusy(false);
         }
     }
@@ -1433,9 +1541,10 @@ public sealed class MainForm : Form
             ShowRankingCompletionPopup(scope, summary.SuccessCount, summary.FailureCount, summary.Events);
             EnsureAutoRetryFailedRankingsLoop();
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (Exception ex)
         {
@@ -2054,9 +2163,10 @@ public sealed class MainForm : Form
             using var dialog = new PropertyAnalysisForm(analysis);
             dialog.ShowDialog(this);
         }
-        catch (OperationCanceledException) when (_lifetime.IsCancellationRequested)
+        catch (OperationCanceledException)
         {
-            // App is closing.
+            // 앱 종료 또는 사용자의 조회중단.
+            HandleOperationCancelled();
         }
         catch (Exception ex)
         {
@@ -2627,16 +2737,71 @@ public sealed class MainForm : Form
             _trayIcon.Dispose();
             _busyOverlay.Dispose();
             _applicationIcon.Dispose();
+            _operationCancellation?.Dispose();
             _lifetime.Dispose();
         }
         base.Dispose(disposing);
     }
 
+    /// <summary>
+    /// 진행 중인 조회에 사용할 취소 토큰. 작업이 없으면 앱 종료 토큰을 사용한다.
+    /// </summary>
+    private CancellationToken OperationToken => _operationCancellation?.Token ?? _lifetime.Token;
+
+    /// <summary>조회 작업을 시작하며 중단 가능한 토큰을 준비한다.</summary>
+    private void BeginCancellableOperation(CancellableOperationKind kind)
+    {
+        _operationCancellation?.Dispose();
+        _operationCancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token);
+        _operationCancelledByUser = false;
+        _operationKind = kind;
+    }
+
+    /// <summary>조회 작업을 끝내고 취소 토큰을 정리한다.</summary>
+    private void EndCancellableOperation()
+    {
+        _operationCancellation?.Dispose();
+        _operationCancellation = null;
+        _operationKind = CancellableOperationKind.None;
+    }
+
+    /// <summary>조회중단 버튼 처리. 진행 중인 요청을 즉시 취소한다.</summary>
+    private void CancelCurrentOperation()
+    {
+        var cancellation = _operationCancellation;
+        if (cancellation is null || cancellation.IsCancellationRequested) return;
+        _operationCancelledByUser = true;
+        SetStatus("조회를 중단하는 중입니다...");
+        cancellation.Cancel();
+    }
+
+    /// <summary>취소 예외 처리. 앱 종료 중이면 조용히 넘어간다.</summary>
+    private void HandleOperationCancelled()
+    {
+        if (_lifetime.IsCancellationRequested) return;
+        SetStatus("조회를 중단했습니다.");
+    }
+
+    /// <summary>
+    /// 진행 중인 작업을 시작한 버튼만 조회중단으로 바꿔 누를 수 있게 한다.
+    /// 나머지 버튼은 기존처럼 조회가 끝날 때까지 비활성 상태로 둔다.
+    /// 자동 조회로 시작한 작업도 성격에 맞는 버튼에서 중단할 수 있다.
+    /// </summary>
+    private void ApplyOperationButtonState(bool busy, bool blocked)
+    {
+        var cancellable = busy && _operationCancellation is not null;
+        var loadCancels = cancellable && _operationKind == CancellableOperationKind.ListingSync;
+        var refreshCancels = cancellable && _operationKind == CancellableOperationKind.RankingRefresh;
+        _loadButton.Text = loadCancels ? CancelOperationButtonText : LoadButtonDefaultText;
+        _refreshButton.Text = refreshCancels ? CancelOperationButtonText : RefreshButtonDefaultText;
+        _loadButton.Enabled = loadCancels || (!busy && !blocked);
+        _refreshButton.Enabled = refreshCancels || (!busy && !blocked && _hasLoadedListings);
+    }
+
     private void SetBusy(bool busy)
     {
         var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
-        _loadButton.Enabled = !busy && !blocked;
-        _refreshButton.Enabled = !busy && !blocked && _hasLoadedListings;
+        ApplyOperationButtonState(busy, blocked);
         UpdateRetryFailedRankingsButton(busy);
         _advertisementAnalysisButton.Enabled = !busy && CanUseAdvertisementAnalysis;
         _settingsButton.Enabled = !busy;
@@ -2660,8 +2825,7 @@ public sealed class MainForm : Form
     private void SetListingLoadBusy(bool busy)
     {
         var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
-        _loadButton.Enabled = !busy && !blocked;
-        _refreshButton.Enabled = !busy && !blocked && _hasLoadedListings;
+        ApplyOperationButtonState(busy, blocked);
         UpdateRetryFailedRankingsButton(busy);
         _advertisementAnalysisButton.Enabled = !busy && CanUseAdvertisementAnalysis;
         _settingsButton.Enabled = !busy;
@@ -2690,6 +2854,8 @@ public sealed class MainForm : Form
     private void SetStatus(string text)
     {
         _status.Text = text;
+        // 하단 상태표시줄과 같은 내용을 검색조건 줄에도 볼드로 표시한다.
+        _progressStatus.Text = text;
     }
 
     private async Task<bool> EnsureMemberGroupAsync(string groupId)
