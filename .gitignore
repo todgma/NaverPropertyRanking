@@ -14,3 +14,4 @@ client.bundle.js
 publish/
 listing-cache.inf
 src/NaverPropertyRanking/appsettings.json
+*.bak
