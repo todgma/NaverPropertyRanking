@@ -1702,8 +1702,8 @@ public sealed class MainForm : Form
             : $"완료: {scope} · 성공 {attemptedSuccesses}건 / 실패 {attemptedFailures}건");
         if (requestCount > 0 && showCompletionPopup)
             ShowRankingCompletionPopup(scope, attemptedSuccesses, attemptedFailures, allEvents);
-        // 목록·랭킹이 갱신됐으니 열려 있는 동일매물·물건분석 팝업도 최신 데이터로 다시 조회한다.
-        if (requestCount > 0) await ReloadDataPopupsAsync();
+        // 방금 받은 결과로 팝업을 맞춘다. 팝업이 API를 다시 부르지는 않는다.
+        if (requestCount > 0) UpdateDataPopupsFromListings();
 
         var summary = new RankingBatchSummary(
             attemptedSuccesses,
@@ -2609,6 +2609,7 @@ public sealed class MainForm : Form
         var articleNo = tag.Listing.ArticleNo;
         var groupId = FirstNotEmpty(_loadedListingGroupId, _groupId.Text.Trim(), _settings.GroupId);
         ShowDataPopup(
+            articleNo,
             () => new DuplicateListingForm(
                 tag.Result,
                 groupId,
@@ -2727,13 +2728,17 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
-    /// 팝업 종류마다 창 하나만 유지한다(분석·동일매물·광고분석 각 1개).
-    /// 이미 열려 있으면 새 창을 만들지 않고 그 창의 내용을 요청한 매물로 바꾼 뒤 앞으로 가져온다.
+    /// 같은 매물의 같은 팝업이 열려 있으면 새 창을 만들지 않고 그 창을 갱신한 뒤 앞으로 가져온다.
+    /// 다른 매물이면 별도 창으로 계속 생성해 여러 매물을 나란히 비교할 수 있다.
+    /// 광고분석처럼 매물 단위가 아닌 팝업은 고정 키를 써서 항상 한 창만 유지한다.
     /// </summary>
-    private TPopup ShowDataPopup<TPopup>(Func<TPopup> create, Action<TPopup>? update = null)
+    private TPopup ShowDataPopup<TPopup>(
+        string articleNo,
+        Func<TPopup> create,
+        Action<TPopup>? update = null)
         where TPopup : Form
     {
-        var key = typeof(TPopup).Name;
+        var key = $"{typeof(TPopup).Name}:{articleNo}";
         if (_dataPopups.TryGetValue(key, out var tracked) &&
             tracked is TPopup existing &&
             !existing.IsDisposed)
@@ -2751,9 +2756,31 @@ public sealed class MainForm : Form
             if (_dataPopups.TryGetValue(key, out var current) && ReferenceEquals(current, popup))
                 _dataPopups.Remove(key);
         };
-        popup.Show(this);
+        // 소유 창을 지정하면 팝업이 항상 본 창 위에 떠서 본 창을 선택해도 앞으로 나오지 않는다.
+        // 독립 창으로 띄워 일반 창처럼 앞뒤를 오갈 수 있게 한다.
+        popup.StartPosition = FormStartPosition.Manual;
+        popup.Location = NextPopupLocation(popup.Size);
+        popup.Show();
         FocusDataPopup(popup);
         return popup;
+    }
+
+    /// <summary>
+    /// 새 팝업 위치. 본 창 근처에서 열린 팝업 수만큼 어긋나게 놓아 창이 겹쳐 가려지지 않게 한다.
+    /// 화면 밖으로 나가면 처음 위치로 되돌린다.
+    /// </summary>
+    private Point NextPopupLocation(Size popupSize)
+    {
+        var workingArea = Screen.FromControl(this).WorkingArea;
+        var origin = new Point(Left + 40, Top + 40);
+        var offset = Math.Min(_dataPopups.Count, 6) * 28;
+        var location = new Point(origin.X + offset, origin.Y + offset);
+        if (location.X + popupSize.Width > workingArea.Right ||
+            location.Y + popupSize.Height > workingArea.Bottom)
+            location = origin;
+        return new Point(
+            Math.Max(workingArea.Left, Math.Min(location.X, workingArea.Right - popupSize.Width)),
+            Math.Max(workingArea.Top, Math.Min(location.Y, workingArea.Bottom - popupSize.Height)));
     }
 
     /// <summary>
@@ -2766,7 +2793,7 @@ public sealed class MainForm : Form
         BeginInvoke(() =>
         {
             if (popup.IsDisposed) return;
-            if (!popup.Visible) popup.Show(this);
+            if (!popup.Visible) popup.Show();
             if (popup.WindowState == FormWindowState.Minimized)
                 popup.WindowState = FormWindowState.Normal;
             popup.BringToFront();
@@ -2787,10 +2814,11 @@ public sealed class MainForm : Form
     }
 
     /// <summary>
-    /// 목록·랭킹이 갱신되면 열려 있는 팝업도 최신 데이터로 다시 조회한다.
-    /// 팝업이 없으면 아무 일도 하지 않는다.
+    /// 목록·랭킹이 갱신되면 열려 있는 팝업에 알린다.
+    /// 방금 받은 랭킹 결과를 그대로 넘기므로 팝업이 API를 다시 부르지 않는다.
+    /// API 재조회는 사용자가 팝업의 새로고침을 눌렀을 때만 일어난다.
     /// </summary>
-    private async Task ReloadDataPopupsAsync()
+    private void UpdateDataPopupsFromListings()
     {
         var popups = _dataPopups.Values
             .OfType<IReloadablePopup>()
@@ -2800,15 +2828,11 @@ public sealed class MainForm : Form
         {
             try
             {
-                await popup.ReloadAsync();
-            }
-            catch (OperationCanceledException)
-            {
-                return;
+                popup.OnListingsUpdated(_rankingCache);
             }
             catch
             {
-                // 팝업 갱신 실패는 본 화면 흐름을 막지 않는다. 팝업이 자체 상태 줄에 표시한다.
+                // 팝업 갱신 실패는 본 화면 흐름을 막지 않는다.
             }
         }
     }
@@ -2899,6 +2923,7 @@ public sealed class MainForm : Form
             SetStatus($"물건분석 표시 · {listing.ArticleNo} · 상위 동일매물 {analysis.TopAdvertisements.Count}건");
             var articleNo = listing.ArticleNo;
             ShowDataPopup(
+                articleNo,
                 () => new PropertyAnalysisForm(
                     analysis,
                     token => RefreshPropertyAnalysisAsync(articleNo, token)),
@@ -2988,6 +3013,7 @@ public sealed class MainForm : Form
             var advertisementGroupId =
                 FirstNotEmpty(_loadedListingGroupId, _groupId.Text.Trim(), _settings.GroupId);
             ShowDataPopup(
+                "all",
                 () => new OwnedComplexListForm(
                     complexes,
                     advertisementGroupId,
@@ -3468,6 +3494,8 @@ public sealed class MainForm : Form
         {
             foreach (var popup in _notificationPopups.ToList()) popup.Dispose();
             _notificationPopups.Clear();
+            // 소유 창이 없는 데이터 팝업은 본 창이 닫혀도 남으므로 여기서 함께 정리한다.
+            CloseDataPopups();
             _sessionHeartbeatTimer?.Dispose();
             _timer.Dispose();
             _cooldownUiTimer.Dispose();

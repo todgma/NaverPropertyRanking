@@ -52,7 +52,7 @@ public sealed class PropertyAnalysisForm : Form, IReloadablePopup
         _analysis = analysis;
         _refreshAsync = refreshAsync;
         Text = $"물건분석 · {analysis.RankingResult.OwnListing.ArticleNo}";
-        StartPosition = FormStartPosition.CenterParent;
+        StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(980, 520);
         Size = new Size(1380, 760);
         Font = new Font("맑은 고딕", 9F);
@@ -81,8 +81,31 @@ public sealed class PropertyAnalysisForm : Form, IReloadablePopup
         Shown += (_, _) => LoadComparisons();
     }
 
-    /// <summary>본 화면이 갱신됐을 때 호출된다. 새로고침 버튼과 같은 동작이다.</summary>
-    public Task ReloadAsync() => RefreshAsync();
+    /// <summary>
+    /// 본 화면의 목록·랭킹이 갱신됐을 때 호출된다.
+    /// 비교표는 매물 상세 API 결과로 만들어지는데 그 값은 본 화면이 갖고 있지 않다.
+    /// 그래서 여기서는 API를 부르지 않고 순위가 달라졌다는 사실만 알리고,
+    /// 실제 비교표 갱신은 사용자가 새로고침을 눌렀을 때 한다.
+    /// </summary>
+    public void OnListingsUpdated(IReadOnlyDictionary<string, RankingResult> rankingResults)
+    {
+        if (IsDisposed || _lifetimeReleased) return;
+        var articleNo = _analysis.RankingResult.OwnListing.ArticleNo;
+        if (!rankingResults.TryGetValue(articleNo, out var updated) || !updated.Success) return;
+
+        var previousRank = _analysis.RankingResult.Rank;
+        if (previousRank == updated.Rank &&
+            _analysis.RankingResult.Total == updated.Total)
+            return;
+
+        _status.Text =
+            $"내매물 {articleNo} · 매물목록이 갱신되었습니다" +
+            $"(현재순위 {RankText(previousRank)} → {RankText(updated.Rank)}, " +
+            $"동일매물 {_analysis.RankingResult.Total}건 → {updated.Total}건). " +
+            "새로고침을 누르면 비교표를 다시 조회합니다.";
+    }
+
+    private static string RankText(int? rank) => rank is { } value ? $"{value}위" : "-";
 
     /// <summary>
     /// 창을 새로 만들지 않고 다른 매물의 분석 결과로 내용을 바꾼다.

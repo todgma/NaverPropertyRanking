@@ -51,7 +51,7 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
         _groupId = groupId.Trim();
         _refreshAsync = refreshAsync;
         Text = $"동일매물 목록 · {result.OwnListing.ArticleNo}";
-        StartPosition = FormStartPosition.CenterParent;
+        StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(900, 460);
         Size = new Size(1240, 680);
         Font = new Font("맑은 고딕", 9F);
@@ -163,8 +163,9 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
             var row = _grid.Rows[rowIndex];
             if (isMine)
             {
-                // 내 매물은 목록에서 바로 찾을 수 있게 강조한다.
-                row.DefaultCellStyle.BackColor = Color.FromArgb(255, 249, 204);
+                // 본 화면 매물 목록의 내 매물 행과 같은 연초록 배경·볼드로 통일한다.
+                row.DefaultCellStyle.BackColor = Color.FromArgb(244, 250, 247);
+                row.DefaultCellStyle.SelectionBackColor = Color.FromArgb(221, 242, 233);
                 row.DefaultCellStyle.Font = BoldFont();
             }
             else if (_groupId.Length > 0 &&
@@ -183,8 +184,20 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
                        $"{(_result.Rank is { } rank ? rank + "위" : "-")} / 동일매물 {_result.Comparables.Count}건{priceRange}";
     }
 
-    /// <summary>본 화면이 갱신됐을 때 호출된다. 새로고침 버튼과 같은 동작이다.</summary>
-    public Task ReloadAsync() => RefreshAsync();
+    /// <summary>
+    /// 본 화면의 목록·랭킹이 갱신됐을 때 호출된다.
+    /// 본 화면이 이미 받아 둔 결과를 그대로 쓰므로 API를 다시 부르지 않는다.
+    /// </summary>
+    public void OnListingsUpdated(IReadOnlyDictionary<string, RankingResult> rankingResults)
+    {
+        if (IsDisposed || _lifetimeReleased) return;
+        if (!rankingResults.TryGetValue(_result.OwnListing.ArticleNo, out var updated)) return;
+        if (!updated.Success) return;
+
+        _result = updated;
+        LoadRows();
+        _status.Text += $" · {DateTime.Now:HH:mm:ss} 목록 갱신 반영";
+    }
 
     /// <summary>
     /// 창을 새로 만들지 않고 다른 매물의 동일매물 목록으로 내용을 바꾼다.

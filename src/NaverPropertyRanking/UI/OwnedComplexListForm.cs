@@ -112,7 +112,7 @@ public sealed class OwnedComplexListForm : Form
         _complexes = complexes;
         _groupId = groupId.Trim();
         Text = "광고분석 · 단지 목록";
-        StartPosition = FormStartPosition.CenterParent;
+        StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1000, 540);
         Size = new Size(1320, 760);
         Font = new Font("맑은 고딕", 9F);
