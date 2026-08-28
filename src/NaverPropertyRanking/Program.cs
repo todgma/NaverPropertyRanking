@@ -30,7 +30,6 @@ internal static class Program
             var applicationConfiguration = ApplicationConfigurationLoader.Load();
             var store = new LocalStore();
             var settings = store.LoadSettings();
-            AuthenticationSession? authenticationSession = null;
             GoogleAuthenticationClient? authenticationClient = null;
             try
             {
@@ -39,51 +38,91 @@ internal static class Program
                 {
                     authenticationClient = new GoogleAuthenticationClient(
                         applicationConfiguration.GoogleAuthentication);
-                    using var loginForm = new LoginForm(authenticationClient, settings.LastLoginId);
-                    if (loginForm.ShowDialog() != DialogResult.OK || loginForm.Session is null) return;
+                }
 
-                    authenticationSession = loginForm.Session;
-                    settings.LastLoginId = authenticationSession.UserId;
-                    settings.LoginToken = authenticationSession.Token;
-                    settings.Notices = authenticationSession.Notices.ToList();
-                    store.SaveSettings(settings);
-                }
-                var credentialFingerprint = NaverAuthValidator.GetFingerprint(applicationConfiguration.Api);
-                if (NaverAuthValidator.GetError(applicationConfiguration.Api) is null
-                    && !string.Equals(settings.CredentialFingerprint, credentialFingerprint, StringComparison.Ordinal))
+                // 멤버십 종료 등으로 세션이 닫히면 프로그램을 끄지 않고 로그인 화면으로 돌아온다.
+                while (true)
                 {
-                    settings.CredentialFingerprint = credentialFingerprint;
-                    settings.RateLimitBlockedUntilUtc = null;
-                    settings.RateLimitCooldownSource = string.Empty;
+                    AuthenticationSession? authenticationSession = null;
+                    if (authenticationClient is not null)
+                    {
+                        using var loginForm = new LoginForm(authenticationClient, settings.LastLoginId);
+                        if (loginForm.ShowDialog() != DialogResult.OK || loginForm.Session is null) return;
+
+                        authenticationSession = loginForm.Session;
+                        settings.LastLoginId = authenticationSession.UserId;
+                        settings.LoginToken = authenticationSession.Token;
+                        settings.Notices = authenticationSession.Notices.ToList();
+                        store.SaveSettings(settings);
+
+                        // 네이버 인증값은 앱에 넣지 않고 로그인 응답으로 받아 메모리에만 채운다.
+                        if (!NaverCredentialApplier.Apply(
+                                applicationConfiguration.Api,
+                                loginForm.NaverCredentials))
+                        {
+                            MessageBox.Show(
+                                "로그인 서버에서 네이버 인증값을 받지 못했습니다.\n" +
+                                "Apps Script 스크립트 속성에 NAVER_AUTHORIZATION, NAVER_COOKIE를 설정하고\n" +
+                                "새 버전으로 배포했는지 관리자에게 확인해 주세요.",
+                                "네이버 인증값 없음",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Warning);
+                        }
+                    }
+                    var credentialFingerprint = NaverAuthValidator.GetFingerprint(applicationConfiguration.Api);
+                    if (NaverAuthValidator.GetError(applicationConfiguration.Api) is null
+                        && !string.Equals(settings.CredentialFingerprint, credentialFingerprint, StringComparison.Ordinal))
+                    {
+                        settings.CredentialFingerprint = credentialFingerprint;
+                        settings.RateLimitBlockedUntilUtc = null;
+                        settings.RateLimitCooldownSource = string.Empty;
+                    }
+
+                    bool returnToLogin;
+                    using (var apiClient = new NaverLandClient(applicationConfiguration.Api))
+                    {
+                        var mainForm = new MainForm(
+                            store,
+                            apiClient,
+                            settings,
+                            applicationConfiguration.Api,
+                            authenticationSession,
+                            authenticationClient,
+                            applicationConfiguration.Update.CurrentVersion);
+                        Application.Run(mainForm);
+                        returnToLogin = mainForm.ReturnToLogin;
+                    }
+
+                    Logout(authenticationClient, authenticationSession);
+                    // 인증이 꺼져 있으면 돌아갈 로그인 화면이 없으므로 그대로 종료한다.
+                    if (!returnToLogin || authenticationClient is null) return;
                 }
-                using var apiClient = new NaverLandClient(applicationConfiguration.Api);
-                Application.Run(new MainForm(
-                    store,
-                    apiClient,
-                    settings,
-                    applicationConfiguration.Api,
-                    authenticationSession,
-                    authenticationClient,
-                    applicationConfiguration.GoogleAuthentication,
-                    applicationConfiguration.Update.CurrentVersion));
             }
             finally
             {
-                if (authenticationClient is not null && authenticationSession is not null)
-                {
-                    try
-                    {
-                        using var logoutTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                        authenticationClient.LogoutAsync(authenticationSession, logoutTimeout.Token)
-                            .GetAwaiter().GetResult();
-                    }
-                    catch
-                    {
-                        // 비정상 종료는 서버의 heartbeat 만료 처리로 정리합니다.
-                    }
-                }
                 authenticationClient?.Dispose();
             }
+        }
+    }
+
+    /// <summary>
+    /// 서버 세션을 닫아 PC 자리를 즉시 반환한다.
+    /// 실패해도 진행을 막지 않는다. 비정상 종료와 마찬가지로 서버가 알아서 정리한다.
+    /// </summary>
+    private static void Logout(
+        GoogleAuthenticationClient? authenticationClient,
+        AuthenticationSession? authenticationSession)
+    {
+        if (authenticationClient is null || authenticationSession is null) return;
+        try
+        {
+            using var logoutTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            authenticationClient.LogoutAsync(authenticationSession, logoutTimeout.Token)
+                .GetAwaiter().GetResult();
+        }
+        catch
+        {
+            // 통신 실패는 무시한다. 서버 쪽 상태는 다음 로그인 때 덮어써진다.
         }
     }
 

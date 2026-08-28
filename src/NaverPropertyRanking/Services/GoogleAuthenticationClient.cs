@@ -155,12 +155,14 @@ public sealed class GoogleAuthenticationClient : IDisposable
             var notices = apiResponse.Notices is null
                 ? new List<string> { "공지사항을 불러오지 못했습니다. Apps Script를 최신 Code.gs로 다시 배포하세요." }
                 : NormalizeNotices(apiResponse.Notices);
+            var naverCredentials = ToNaverCredentials(apiResponse.NaverCredentials);
             if (!string.Equals(action, "login", StringComparison.OrdinalIgnoreCase))
                 return new AuthenticationResult(
                     true,
                     apiResponse.Message ?? "요청이 완료되었습니다.",
                     Code: apiResponse.Code,
-                    Notices: apiResponse.Notices is null ? null : notices);
+                    Notices: apiResponse.Notices is null ? null : notices,
+                    NaverCredentials: naverCredentials);
 
             var session = new AuthenticationSession(
                 apiResponse.UserId ?? userId.Trim(),
@@ -176,7 +178,12 @@ public sealed class GoogleAuthenticationClient : IDisposable
             if (string.IsNullOrWhiteSpace(session.Token) || string.IsNullOrWhiteSpace(session.SessionId))
                 return new AuthenticationResult(false, "로그인 서버가 세션 정보를 반환하지 않았습니다. Code.gs를 새 버전으로 배포하세요.",
                     Code: "MISSING_SESSION");
-            return new AuthenticationResult(true, apiResponse.Message ?? "로그인되었습니다.", session, apiResponse.Code);
+            return new AuthenticationResult(
+                true,
+                apiResponse.Message ?? "로그인되었습니다.",
+                session,
+                apiResponse.Code,
+                NaverCredentials: naverCredentials);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -237,6 +244,16 @@ public sealed class GoogleAuthenticationClient : IDisposable
             .Select(notice => notice.Trim())
             .ToList() ?? [];
 
+    private static NaverCredentials? ToNaverCredentials(NaverCredentialsResponse? response)
+    {
+        if (response is null) return null;
+        var authorization = (response.Authorization ?? string.Empty).Trim();
+        var cookie = (response.Cookie ?? string.Empty).Trim();
+        var finCookie = (response.FinCookie ?? string.Empty).Trim();
+        if (authorization.Length == 0 && cookie.Length == 0) return null;
+        return new NaverCredentials(authorization, cookie, finCookie);
+    }
+
     private static DateTime? ParseDate(string? value) =>
         DateTime.TryParse(value, out var parsed) ? parsed : null;
 
@@ -257,5 +274,13 @@ public sealed class GoogleAuthenticationClient : IDisposable
         public int CurrentPcCount { get; set; }
         public int Grade { get; set; } = 1;
         public List<string>? Notices { get; set; }
+        public NaverCredentialsResponse? NaverCredentials { get; set; }
+    }
+
+    private sealed class NaverCredentialsResponse
+    {
+        public string? Authorization { get; set; }
+        public string? Cookie { get; set; }
+        public string? FinCookie { get; set; }
     }
 }

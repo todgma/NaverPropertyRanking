@@ -21,19 +21,13 @@ public sealed class SettingsForm : Form
     private readonly NumericUpDown _threshold = new() { Minimum = 1, Maximum = 9999, Width = 90 };
     private readonly CheckBox _priceChange = new() { Text = "타 중개사 동일매물 가격 변경 알림", AutoSize = true };
     private readonly CheckBox _newDuplicate = new() { Text = "내 단독매물에 동일매물이 생길 때 알림", AutoSize = true };
-    private readonly CheckBox _propertyAnalysis = new()
-    {
-        Name = "PropertyAnalysisToggle",
-        Text = "매물분석",
-        AutoSize = true
-    };
 
     public SettingsForm(AppSettings current)
     {
         Text = "조회 및 알림 설정";
         StartPosition = FormStartPosition.CenterParent;
-        MinimumSize = new Size(680, 580);
-        Size = new Size(760, 620);
+        MinimumSize = new Size(680, 470);
+        Size = new Size(760, 510);
         Font = new Font("맑은 고딕", 9F);
         BackColor = Color.White;
 
@@ -70,10 +64,6 @@ public sealed class SettingsForm : Form
         AddRow(root, ref row, string.Empty, _rankThreshold);
         AddRow(root, ref row, "랭킹 기준", _threshold);
 
-        AddSeparator(root, ref row);
-        AddSection(root, ref row, "매물분석");
-        AddRow(root, ref row, "분석설정", _propertyAnalysis);
-
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -105,7 +95,6 @@ public sealed class SettingsForm : Form
         _threshold.Value = Math.Clamp(settings.RankThreshold, 1, 9999);
         _priceChange.Checked = settings.NotifyCompetitorPriceChange;
         _newDuplicate.Checked = settings.NotifyNewDuplicate;
-        _propertyAnalysis.Checked = settings.PropertyAnalysisEnabled;
     }
 
     private void SaveAndClose()
@@ -119,7 +108,6 @@ public sealed class SettingsForm : Form
         EditedSettings.RankThreshold = (int)_threshold.Value;
         EditedSettings.NotifyCompetitorPriceChange = _priceChange.Checked;
         EditedSettings.NotifyNewDuplicate = _newDuplicate.Checked;
-        EditedSettings.PropertyAnalysisEnabled = _propertyAnalysis.Checked;
         DialogResult = DialogResult.OK;
         Close();
     }

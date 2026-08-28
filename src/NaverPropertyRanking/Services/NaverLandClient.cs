@@ -104,10 +104,11 @@ public sealed class NaverLandClient : IDisposable
         AppSettings settings,
         CancellationToken cancellationToken)
     {
+        RankingResult result;
         await _rankingConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await GetRankingCoreAsync(
+            result = await GetRankingCoreAsync(
                     ownListing,
                     ownArticleNumbers,
                     settings,
@@ -117,6 +118,48 @@ public sealed class NaverLandClient : IDisposable
         finally
         {
             _rankingConcurrency.Release();
+        }
+
+        // 랭킹 응답에도 단지번호가 없으면 이 매물을 처리하는 김에 상세 API로 바로 채운다.
+        // 랭킹 게이트를 놓은 뒤에 호출하므로 랭킹 동시 실행 수를 잡아먹지 않고,
+        // 상세 API는 별도 스로틀을 쓰기 때문에 랭킹 대기 시간에 그대로 묻힌다.
+        return await BindComplexNoAsync(result, settings, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// 랭킹 결과의 내 매물에 단지번호가 비어 있으면 매물 상세 API로 보강한다.
+    /// 상세 조회가 실패해도 랭킹 결과는 그대로 돌려준다.
+    /// </summary>
+    private async Task<RankingResult> BindComplexNoAsync(
+        RankingResult result,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        var ownListing = result.OwnListing;
+        if (!string.IsNullOrWhiteSpace(ownListing.ComplexNo) ||
+            string.IsNullOrWhiteSpace(ownListing.ArticleNo))
+            return result;
+
+        // 429 쿨다운 중에는 어차피 호출이 막히므로 상세 조회를 시도하지 않는다.
+        if (settings.RateLimitBlockedUntilUtc is { } blockedUntil && blockedUntil > DateTime.UtcNow)
+            return result;
+
+        try
+        {
+            var detail = await GetArticleComparisonDetailAsync(ownListing, settings, cancellationToken)
+                .ConfigureAwait(false);
+            var complexNo = detail.Listing.ComplexNo;
+            return string.IsNullOrWhiteSpace(complexNo)
+                ? result
+                : result with { OwnListing = ownListing with { ComplexNo = complexNo.Trim() } };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return result;
         }
     }
 

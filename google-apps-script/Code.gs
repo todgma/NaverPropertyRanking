@@ -1,17 +1,32 @@
 const MEMBER_SHEET = '회원정보';
 const HISTORY_SHEET = '이력';
-const SESSION_SHEET = '접속현황';
 const NOTICE_SHEET = '공지사항';
 const MEMBER_GROUP_SHEET = '회원_단체';
 const MEMBER_HEADERS = [
   '아이디', '비밀번호해시', '솔트', '이름', '가입일시',
   '멤버십 시작일자', '멤버십 종료일자', '사용가능PC수', '등급'
 ];
-const HISTORY_HEADERS = ['토큰', '로그인일시', '아이디', '아이피'];
-const SESSION_HEADERS = [
-  '세션ID', '토큰', '아이디', 'PC명', '로그인일시',
-  '마지막신호일시', '종료일시', '상태'
+// 접속 상태를 토큰(계정×PC 조합) 기준 1행으로 관리한다.
+// 로그인은 upsert, 하트비트는 최종접속일시만 갱신하므로 행이 누적되지 않는다.
+// 최종로그인일시(실제 로그인)와 최종접속일시(하트비트)는 반드시 분리해서 관리한다.
+const HISTORY_HEADERS = [
+  '토큰', '아이디', 'PC명', '아이피', '앱버전', '세션ID',
+  '최초로그인일시', '최종로그인일시', '최종접속일시', '종료일시', '상태'
 ];
+// 시트 컬럼 번호(1부터). 배열 인덱스로 쓸 때는 -1 한다.
+const HISTORY_COLUMN = {
+  TOKEN: 1,
+  USER_ID: 2,
+  DEVICE_NAME: 3,
+  IP: 4,
+  APP_VERSION: 5,
+  SESSION_ID: 6,
+  FIRST_LOGIN_AT: 7,
+  LAST_LOGIN_AT: 8,
+  LAST_SEEN_AT: 9,
+  CLOSED_AT: 10,
+  STATUS: 11
+};
 const NOTICE_HEADERS = ['공지내용'];
 const MEMBER_GROUP_HEADERS = ['id', '단체id'];
 const LEGACY_HASH_ITERATIONS = 8000;
@@ -20,6 +35,14 @@ const CURRENT_HASH_PREFIX = 'v2$';
 // 회원가입 시 멤버십 종료일자 기본값: 가입일 다음날(가입 당일 하루 사용 가능).
 const DEFAULT_SIGNUP_MEMBERSHIP_DAYS = 1;
 const DEFAULT_MEMBER_GRADE = 1;
+// 네이버 인증값을 담는 스크립트 속성 이름.
+// 앱에 넣지 않고 로그인·접속 확인 응답으로 내려보내므로, 값이 새면 여기만 바꾸면 된다.
+// 프로젝트 설정 > 스크립트 속성에서 관리한다(스프레드시트나 소스에 남기지 않는다).
+const NAVER_CREDENTIAL_PROPERTIES = {
+  AUTHORIZATION: 'NAVER_AUTHORIZATION',
+  COOKIE: 'NAVER_COOKIE',
+  FIN_COOKIE: 'NAVER_FIN_COOKIE'
+};
 
 function doPost(e) {
   try {
@@ -64,7 +87,6 @@ function configure() {
   const spreadsheetId = 'YOUR_SPREADSHEET_ID';
   const defaultMembershipDays = DEFAULT_SIGNUP_MEMBERSHIP_DAYS;
   const defaultAllowedPcCount = 1;
-  const sessionTimeoutSeconds = 300;
   if (spreadsheetId === 'YOUR_SPREADSHEET_ID') {
     throw new Error('configure 함수의 spreadsheetId를 먼저 변경하세요.');
   }
@@ -73,36 +95,12 @@ function configure() {
   properties.setProperties({
     SPREADSHEET_ID: spreadsheetId,
     DEFAULT_MEMBERSHIP_DAYS: String(defaultMembershipDays),
-    DEFAULT_ALLOWED_PC_COUNT: String(defaultAllowedPcCount),
-    SESSION_TIMEOUT_SECONDS: String(sessionTimeoutSeconds)
+    DEFAULT_ALLOWED_PC_COUNT: String(defaultAllowedPcCount)
   });
   if (!properties.getProperty('TOKEN_SECRET')) {
     properties.setProperty('TOKEN_SECRET', Utilities.getUuid() + Utilities.getUuid());
   }
   ensureSheets_();
-  ensureCleanupTrigger_();
-}
-
-function cleanupExpiredSessions() {
-  const lock = LockService.getScriptLock();
-  lock.waitLock(20000);
-  try {
-    const sheets = ensureSheets_();
-    expireStaleSessions_(sheets.sessions, new Date());
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-function ensureCleanupTrigger_() {
-  const exists = ScriptApp.getProjectTriggers()
-    .some(trigger => trigger.getHandlerFunction() === 'cleanupExpiredSessions');
-  if (!exists) {
-    ScriptApp.newTrigger('cleanupExpiredSessions')
-      .timeBased()
-      .everyMinutes(5)
-      .create();
-  }
 }
 
 function signUp_(request) {
@@ -148,6 +146,7 @@ function login_(request) {
   const deviceId = String(request.deviceId || '').trim();
   const deviceName = String(request.deviceName || '').trim().substring(0, 100);
   const ip = String(request.ip || '확인불가').trim().substring(0, 64);
+  const appVersion = String(request.appVersion || '').trim().substring(0, 40);
   if (!/^[A-Za-z0-9._-]{4,50}$/.test(userId) || password.length < 4 || !deviceId) {
     return { success: false, code: 'INVALID_CREDENTIALS', message: '아이디 또는 패스워드를 확인하세요.' };
   }
@@ -174,24 +173,34 @@ function login_(request) {
       return { success: false, code: 'MEMBERSHIP_EXPIRED', message: '멤버십 사용 기간이 아닙니다. 관리자에게 문의하세요.' };
     }
 
-    expireStaleSessions_(sheets.sessions, now);
+    // 이력 시트는 이 회원이 등록한 PC 목록이다. 등록된 PC에서 다시 로그인하는 것은
+    // 언제든 허용하고, 새 PC는 사용가능PC수 안에서만 등록한다.
+    // PC를 교체하면 관리자가 시트에서 이전 PC 행을 지워 자리를 비운다.
     const token = createDeviceToken_(userId, deviceId);
-    const activeTokens = enforcePcLimit_(sheets.sessions, userId, member.allowedPcCount, now);
-    if (!activeTokens.has(token) && activeTokens.size >= member.allowedPcCount) {
+    const registeredPcs = getRegisteredPcs_(sheets.history, userId);
+    const isRegisteredPc = registeredPcs.some(pc => pc.token === token);
+    if (!isRegisteredPc && registeredPcs.length >= member.allowedPcCount) {
       return {
         success: false,
         code: 'PC_LIMIT',
-        message: `사용 가능한 PC 수(${member.allowedPcCount}대)를 초과했습니다.`
+        message: `사용 가능한 PC 수(${member.allowedPcCount}대)를 초과했습니다. ` +
+          'PC를 교체하셨다면 관리자에게 이전 PC 정보 삭제를 요청하세요.'
       };
     }
 
-    closeActiveTokenSessions_(sheets.sessions, userId, token, now, 'REPLACED');
+    // 토큰(계정×PC)당 1행만 유지한다. 같은 PC에서 다시 로그인하면 기존 행을 갱신하면서
+    // 세션ID가 새로 발급되므로 이전 세션은 자동으로 무효가 된다.
     const sessionId = Utilities.getUuid();
-    sheets.sessions.appendRow([
-      sessionId, token, userId, deviceName || '알 수 없음', now, now, '', 'ACTIVE'
-    ]);
-    activeTokens.add(token);
-    sheets.history.appendRow([token, now, userId, ip || '확인불가']);
+    upsertHistoryOnLogin_(sheets.history, {
+      token: token,
+      userId: userId,
+      deviceName: deviceName || '알 수 없음',
+      ip: ip || '확인불가',
+      appVersion: appVersion,
+      sessionId: sessionId,
+      now: now
+    });
+    const currentPcCount = isRegisteredPc ? registeredPcs.length : registeredPcs.length + 1;
     const notices = getNotices_(sheets.notices);
     return {
       success: true,
@@ -204,9 +213,10 @@ function login_(request) {
       membershipStart: start.toISOString(),
       membershipEnd: end.toISOString(),
       allowedPcCount: member.allowedPcCount,
-      currentPcCount: activeTokens.size,
+      currentPcCount: currentPcCount,
       grade: member.grade,
-      notices: notices
+      notices: notices,
+      naverCredentials: getNaverCredentials_()
     };
   } finally {
     lock.releaseLock();
@@ -216,6 +226,7 @@ function login_(request) {
 function heartbeat_(request) {
   const sessionId = String(request.sessionId || '').trim();
   const token = String(request.token || '').trim();
+  const appVersion = String(request.appVersion || '').trim().substring(0, 40);
   if (!sessionId || !token) {
     return { success: false, code: 'INVALID_SESSION', message: '세션 정보가 없습니다.' };
   }
@@ -225,40 +236,43 @@ function heartbeat_(request) {
   try {
     const sheets = ensureSheets_();
     const now = new Date();
-    expireStaleSessions_(sheets.sessions, now);
-    let session = findSession_(sheets.sessions, sessionId);
-    if (!session || session.token !== token || session.status !== 'ACTIVE') {
+    // 시간 경과로 세션을 끊지 않는다. 등록된 PC 행이 남아 있고 세션ID가 맞으면 계속 유효하다.
+    // 관리자가 시트에서 PC 행을 지우면 그 PC의 앱은 다음 확인 때 종료된다.
+    const session = findSessionByToken_(sheets.history, token);
+    if (!session || session.sessionId !== sessionId) {
       return { success: false, code: 'SESSION_EXPIRED', message: '로그인 세션이 만료되었습니다. 다시 로그인하세요.' };
     }
 
     const member = findMember_(sheets.members, session.userId);
     if (!member) {
-      closeSession_(sheets.sessions, session.row, now, 'MEMBER_DELETED');
+      closeSession_(sheets.history, session.row, now, 'MEMBER_DELETED');
       return { success: false, code: 'MEMBER_NOT_FOUND', message: '회원정보가 삭제되었습니다.' };
     }
     const start = asDate_(member.membershipStart);
     const end = asDate_(member.membershipEnd);
     if (!isMembershipActive_(now, start, end)) {
-      closeSession_(sheets.sessions, session.row, now, 'MEMBERSHIP_EXPIRED');
+      closeSession_(sheets.history, session.row, now, 'MEMBERSHIP_EXPIRED');
       return { success: false, code: 'MEMBERSHIP_EXPIRED', message: '멤버십 사용 기간이 종료되었습니다.' };
     }
 
-    const activeTokens = enforcePcLimit_(sheets.sessions, session.userId, member.allowedPcCount, now);
-    session = findSession_(sheets.sessions, sessionId);
-    if (!session || session.status !== 'ACTIVE' || !activeTokens.has(token)) {
-      return { success: false, code: 'PC_LIMIT', message: `사용 가능한 PC 수(${member.allowedPcCount}대)를 초과했습니다.` };
+    // 최종접속일시만 갱신한다. 최종로그인일시는 로그인 때만 기록해 구분을 유지한다.
+    sheets.history.getRange(session.row, HISTORY_COLUMN.LAST_SEEN_AT).setValue(now);
+    if (session.status !== 'ACTIVE') {
+      sheets.history.getRange(session.row, HISTORY_COLUMN.CLOSED_AT, 1, 2).setValues([['', 'ACTIVE']]);
     }
-
-    sheets.sessions.getRange(session.row, 6).setValue(now);
+    if (appVersion) {
+      sheets.history.getRange(session.row, HISTORY_COLUMN.APP_VERSION).setValue(appVersion);
+    }
     return {
       success: true,
       code: 'HEARTBEAT_OK',
       message: '접속 상태가 갱신되었습니다.',
       allowedPcCount: member.allowedPcCount,
-      currentPcCount: activeTokens.size,
+      currentPcCount: getRegisteredPcs_(sheets.history, session.userId).length,
       grade: member.grade,
       membershipEnd: end.toISOString(),
-      notices: getNotices_(sheets.notices)
+      notices: getNotices_(sheets.notices),
+      naverCredentials: getNaverCredentials_()
     };
   } finally {
     lock.releaseLock();
@@ -276,11 +290,11 @@ function logout_(request) {
   lock.waitLock(20000);
   try {
     const sheets = ensureSheets_();
-    const session = findSession_(sheets.sessions, sessionId);
-    if (!session || session.token !== token) {
+    const session = findSessionByToken_(sheets.history, token);
+    if (!session || session.sessionId !== sessionId) {
       return { success: true, code: 'ALREADY_CLOSED', message: '이미 종료된 세션입니다.' };
     }
-    if (session.status === 'ACTIVE') closeSession_(sheets.sessions, session.row, new Date(), 'LOGOUT');
+    if (session.status === 'ACTIVE') closeSession_(sheets.history, session.row, new Date(), 'LOGOUT');
     return { success: true, code: 'LOGOUT_SUCCESS', message: '로그아웃되었습니다.' };
   } finally {
     lock.releaseLock();
@@ -303,9 +317,8 @@ function saveMemberGroup_(request) {
   try {
     const sheets = ensureSheets_();
     const now = new Date();
-    expireStaleSessions_(sheets.sessions, now);
-    const session = findSession_(sheets.sessions, sessionId);
-    if (!session || session.token !== token || session.status !== 'ACTIVE') {
+    const session = findSessionByToken_(sheets.history, token);
+    if (!session || session.sessionId !== sessionId) {
       return { success: false, code: 'SESSION_EXPIRED', message: '로그인 세션이 만료되었습니다. 다시 로그인하세요.' };
     }
     if (findMemberGroup_(sheets.memberGroups, session.userId, groupId)) {
@@ -332,7 +345,6 @@ function ensureSheets_() {
   const members = ensureSheet_(spreadsheet, sheetsByName, MEMBER_SHEET, MEMBER_HEADERS);
   ensureMemberGrades_(members);
   const history = ensureSheet_(spreadsheet, sheetsByName, HISTORY_SHEET, HISTORY_HEADERS);
-  const sessions = ensureSheet_(spreadsheet, sheetsByName, SESSION_SHEET, SESSION_HEADERS);
   const memberGroups = ensureSheet_(spreadsheet, sheetsByName, MEMBER_GROUP_SHEET, MEMBER_GROUP_HEADERS);
   let notices = allSheets.filter(sheet => normalizeSheetName_(sheet.getName()) === normalizeSheetName_(NOTICE_SHEET));
   if (notices.length === 0) {
@@ -341,7 +353,6 @@ function ensureSheets_() {
   return {
     members: members,
     history: history,
-    sessions: sessions,
     notices: notices,
     memberGroups: memberGroups
   };
@@ -431,23 +442,77 @@ function findMember_(sheet, userId) {
   return null;
 }
 
-function findSession_(sheet, sessionId) {
+/** 이력 시트 전체를 한 번만 읽어 다루기 쉬운 형태로 돌려준다. */
+function readHistoryRows_(sheet) {
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return null;
-  const rows = sheet.getRange(2, 1, lastRow - 1, SESSION_HEADERS.length).getValues();
-  for (let index = 0; index < rows.length; index++) {
-    if (String(rows[index][0]) !== sessionId) continue;
-    return {
+  if (lastRow < 2) return [];
+  return sheet
+    .getRange(2, 1, lastRow - 1, HISTORY_HEADERS.length)
+    .getValues()
+    .map((row, index) => ({
       row: index + 2,
-      sessionId: String(rows[index][0]),
-      token: String(rows[index][1]),
-      userId: String(rows[index][2]),
-      loginAt: rows[index][4],
-      lastHeartbeatAt: rows[index][5],
-      status: String(rows[index][7])
-    };
+      token: String(row[HISTORY_COLUMN.TOKEN - 1]).trim(),
+      userId: String(row[HISTORY_COLUMN.USER_ID - 1]).trim(),
+      sessionId: String(row[HISTORY_COLUMN.SESSION_ID - 1]).trim(),
+      firstLoginAt: row[HISTORY_COLUMN.FIRST_LOGIN_AT - 1],
+      lastLoginAt: row[HISTORY_COLUMN.LAST_LOGIN_AT - 1],
+      lastSeenAt: row[HISTORY_COLUMN.LAST_SEEN_AT - 1],
+      status: String(row[HISTORY_COLUMN.STATUS - 1]).trim()
+    }));
+}
+
+/**
+ * 앱이 네이버 API를 호출할 때 쓸 인증값을 스크립트 속성에서 읽어 돌려준다.
+ * 앱에는 저장하지 않고 메모리에서만 사용하므로, 배포된 exe를 뜯어도 값이 나오지 않는다.
+ * 값이 유출되면 스크립트 속성만 바꾸면 모든 PC에 반영된다.
+ */
+function getNaverCredentials_() {
+  const properties = PropertiesService.getScriptProperties();
+  const authorization = String(properties.getProperty(NAVER_CREDENTIAL_PROPERTIES.AUTHORIZATION) || '').trim();
+  const cookie = String(properties.getProperty(NAVER_CREDENTIAL_PROPERTIES.COOKIE) || '').trim();
+  const finCookie = String(properties.getProperty(NAVER_CREDENTIAL_PROPERTIES.FIN_COOKIE) || '').trim();
+  if (!authorization && !cookie && !finCookie) return null;
+  return {
+    authorization: authorization,
+    cookie: cookie,
+    finCookie: finCookie || cookie
+  };
+}
+
+/** 토큰은 계정×PC마다 유일하므로 이력 시트의 기본 키로 쓴다. */
+function findSessionByToken_(sheet, token) {
+  const rows = readHistoryRows_(sheet);
+  for (let index = 0; index < rows.length; index++) {
+    if (rows[index].token === token) return rows[index];
   }
   return null;
+}
+
+/**
+ * 로그인 시 토큰 행을 갱신하거나 새로 추가한다.
+ * 기존 행이 있으면 최초로그인일시만 보존하고 나머지를 새 접속 정보로 덮어쓴다.
+ */
+function upsertHistoryOnLogin_(sheet, entry) {
+  const existing = findSessionByToken_(sheet, entry.token);
+  const values = [[
+    entry.token,
+    entry.userId,
+    entry.deviceName,
+    entry.ip,
+    entry.appVersion,
+    entry.sessionId,
+    existing && existing.firstLoginAt ? existing.firstLoginAt : entry.now,
+    entry.now,
+    entry.now,
+    '',
+    'ACTIVE'
+  ]];
+  const row = existing ? existing.row : sheet.getLastRow() + 1;
+  sheet.getRange(row, 1, 1, HISTORY_HEADERS.length).setValues(values);
+  sheet
+    .getRange(row, HISTORY_COLUMN.FIRST_LOGIN_AT, 1, 3)
+    .setNumberFormat('yyyy-mm-dd hh:mm:ss');
+  return row;
 }
 
 function findMemberGroup_(sheet, userId, groupId) {
@@ -462,58 +527,23 @@ function findMemberGroup_(sheet, userId, groupId) {
   );
 }
 
-function getActiveSessions_(sheet, userId) {
-  const result = [];
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return result;
-  const rows = sheet.getRange(2, 1, lastRow - 1, SESSION_HEADERS.length).getValues();
-  rows.forEach((row, index) => {
-    if (String(row[2]).trim().toLowerCase() !== userId.toLowerCase()) return;
-    if (String(row[7]) !== 'ACTIVE') return;
-    result.push({ row: index + 2, token: String(row[1]) });
-  });
-  return result;
+/**
+ * 아이디 기준으로 등록된 PC 목록을 돌려준다.
+ * 상태와 무관하게 행이 존재하면 그 PC는 자리를 차지한 것으로 본다.
+ * PC를 교체하면 관리자가 시트에서 이전 PC 행을 삭제해 자리를 비운다.
+ */
+function getRegisteredPcs_(sheet, userId) {
+  const normalizedUserId = userId.toLowerCase();
+  return readHistoryRows_(sheet)
+    .filter(row => row.token && row.userId.toLowerCase() === normalizedUserId);
 }
 
-function expireStaleSessions_(sheet, now) {
-  const timeoutSeconds = positiveInt_(
-    PropertiesService.getScriptProperties().getProperty('SESSION_TIMEOUT_SECONDS'),
-    300
-  );
-  const cutoff = now.getTime() - timeoutSeconds * 1000;
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
-  const rows = sheet.getRange(2, 1, lastRow - 1, SESSION_HEADERS.length).getValues();
-  rows.forEach((row, index) => {
-    if (String(row[7]) !== 'ACTIVE') return;
-    const lastHeartbeat = asDate_(row[5]);
-    if (lastHeartbeat && lastHeartbeat.getTime() >= cutoff) return;
-    closeSession_(sheet, index + 2, now, 'EXPIRED');
-  });
-}
-
-function enforcePcLimit_(sheet, userId, allowedPcCount, now) {
-  const allowedTokens = new Set();
-  const sessions = getActiveSessions_(sheet, userId);
-  sessions.forEach(session => {
-    if (allowedTokens.has(session.token)) return;
-    if (allowedTokens.size < allowedPcCount) {
-      allowedTokens.add(session.token);
-      return;
-    }
-    closeActiveTokenSessions_(sheet, userId, session.token, now, 'PC_LIMIT');
-  });
-  return allowedTokens;
-}
-
-function closeActiveTokenSessions_(sheet, userId, token, now, status) {
-  getActiveSessions_(sheet, userId)
-    .filter(session => session.token === token)
-    .forEach(session => closeSession_(sheet, session.row, now, status));
-}
-
+/** 접속을 종료 처리한다. 행은 지우지 않고 종료일시와 상태만 남긴다. */
 function closeSession_(sheet, row, now, status) {
-  sheet.getRange(row, 7, 1, 2).setValues([[now, status]]);
+  sheet
+    .getRange(row, HISTORY_COLUMN.CLOSED_AT, 1, 2)
+    .setValues([[now, status]]);
+  sheet.getRange(row, HISTORY_COLUMN.CLOSED_AT).setNumberFormat('yyyy-mm-dd hh:mm:ss');
 }
 
 function createDeviceToken_(userId, deviceId) {

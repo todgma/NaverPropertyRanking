@@ -66,3 +66,12 @@ public sealed record NotificationEvent(
     string ListingName = "",
     string TradeSummary = "",
     NotificationHighlight Highlight = NotificationHighlight.Neutral);
+
+/// <summary>동일매물 금액변동 상세. 금액변동확인 팝업에 표시한다.</summary>
+public sealed record PriceChangeDetail(
+    string ArticleNo,
+    string RealtorName,
+    string PreviousPrice,
+    string CurrentPrice,
+    string RegisteredDate,
+    string VerificationType);

@@ -54,6 +54,9 @@ public sealed partial class LoginForm : Form
 
     public AuthenticationSession? Session { get; private set; }
 
+    /// <summary>로그인 응답으로 받은 네이버 API 인증값. 앱에 저장하지 않고 메모리에서만 쓴다.</summary>
+    public NaverCredentials? NaverCredentials { get; private set; }
+
     private void BuildLayout()
     {
         var title = new Label
@@ -157,10 +160,22 @@ public sealed partial class LoginForm : Form
         if (!result.Success || result.Session is null)
         {
             SetStatus(result.Message, true);
+            // 멤버십·PC 수처럼 관리자 조치가 필요한 사유는 놓치지 않도록 팝업으로도 알린다.
+            // 로그인 화면은 그대로 두어 다른 계정으로 시도하거나 조치 후 재시도할 수 있게 한다.
+            if (RequiresAdministratorNotice(result.Code))
+            {
+                MessageBox.Show(
+                    this,
+                    result.Message,
+                    "로그인할 수 없습니다",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
             return;
         }
 
         Session = result.Session;
+        NaverCredentials = result.NaverCredentials;
         DialogResult = DialogResult.OK;
         Close();
     }
@@ -220,4 +235,13 @@ public sealed partial class LoginForm : Form
         _status.Text = message;
         _status.ForeColor = error ? Color.Firebrick : Color.DimGray;
     }
+
+    /// <summary>
+    /// 아이디·비밀번호를 고쳐서 해결되지 않고 관리자 조치가 필요한 사유인지 판단한다.
+    /// 이런 사유는 붉은 안내 문구만으로는 놓치기 쉬워 팝업으로 한 번 더 알린다.
+    /// </summary>
+    private static bool RequiresAdministratorNotice(string? code) => code is
+        "MEMBERSHIP_EXPIRED" or
+        "PC_LIMIT" or
+        "MEMBER_NOT_FOUND";
 }

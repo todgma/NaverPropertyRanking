@@ -15,4 +15,8 @@ public static class NaverArticleLinkBuilder
 
         return $"https://new.land.naver.com/?articleNo={articleNo}";
     }
+
+    /// <summary>단지 페이지(https://new.land.naver.com/complexes/{단지번호}) 주소를 만든다.</summary>
+    public static string BuildComplexLink(string complexNo) =>
+        $"https://new.land.naver.com/complexes/{Uri.EscapeDataString(complexNo.Trim())}";
 }

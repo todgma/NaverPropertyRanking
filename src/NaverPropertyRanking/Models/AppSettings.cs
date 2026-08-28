@@ -20,7 +20,6 @@ public sealed class AppSettings
     public bool NotifyCompetitorPriceChange { get; set; } = true;
     public bool NotifyNewDuplicate { get; set; } = true;
     public bool PopupNotificationsEnabled { get; set; }
-    public bool PropertyAnalysisEnabled { get; set; }
     public List<string> GridColumnOrder { get; set; } = [];
 
     public bool SaveCredentials { get; set; }

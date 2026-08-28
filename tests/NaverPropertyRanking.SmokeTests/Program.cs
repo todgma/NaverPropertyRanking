@@ -19,6 +19,7 @@ var tests = new List<(string Name, Action Run)>
     ("단일매물 제외 및 재표시", FilterSingleListings),
     ("캐시와 최신 매물 신규 항목 병합", MergeOnlyMissingListings),
     ("현재 목록과 API 결과 추가·삭제 동기화", ReconcileCurrentListings),
+    ("순위조회 시 단지번호 즉시 바인딩", BindComplexNoDuringRanking),
     ("매물목록과 순위 API 동시 실행", RunListingAndRankingConcurrently),
     ("랭킹 API 제한 병렬 실행", RunRankingRequestsConcurrently),
     ("매물 전체·조회 진행 표시", FormatListingLookupProgress),
@@ -34,9 +35,12 @@ var tests = new List<(string Name, Action Run)>
     ("429 쿨다운으로 재호출 차단", RateLimitCooldownBlocksRetry),
     ("누락 인증 차단 및 JWT exp 비차단", ValidateAuthentication),
     ("광고분석 단지 그룹·중개사 상위 3곳", AnalyzeComplexAdvertisements),
+    ("단독→동일생성·금액변동 감지", DetectHighlightedListingChanges),
+    ("금액 등락 비교", CompareListingPrices),
     ("단지 정보 응답 파싱", ParseComplexInformationResponse),
     ("단지 광고 중개인 응답 파싱", ParseAdvertisementRealtorNamesResponse),
     ("appsettings API 옵션 적용", ApplyApiConfiguration),
+    ("서버 수신 네이버 인증값 적용", ApplyServerNaverCredentials),
     ("단일 파일용 설정 리소스 포함", EmbeddedConfigurationAvailable)
 };
 
@@ -129,7 +133,6 @@ static void DetectChanges()
     Assert(new AppSettings().PollIntervalMinutes == 30, "조회 간격 기본 30분");
     Assert(!new AppSettings().PopupNotificationsEnabled, "팝업 알림 기본 해제");
     Assert(AppSettings.NormalizePollInterval(2) == 10, "조회 간격 최소 10분");
-    Assert(!new AppSettings().PropertyAnalysisEnabled, "물건분석 기본 해제");
     var mine = new Listing("2600000001", "서울시 강남구 · 테스트아파트 · 101동 · 남향 올수리 · 10/20층", "매매", "5억", "우리부동산", "mine", "", "101동", "10/20", "84", true)
     {
         ArticleName = "테스트아파트",
@@ -154,9 +157,12 @@ static void DirectArticleNumbersTakePriority()
 {
     var handler = new StubHandler(request => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
     {
-        Content = new StringContent(request.RequestUri?.Query.Contains("representativeArticleNo=2612345678") == true
-            ? "[{\"articleNo\":\"2612345678\"}]"
-            : throw new InvalidOperationException("중개인 목록 API가 호출되었습니다."))
+        Content = new StringContent(
+            request.RequestUri?.Query.Contains("representativeArticleNo=2612345678") == true
+                ? "[{\"articleNo\":\"2612345678\"}]"
+                : request.RequestUri?.AbsolutePath == "/api/articles/2612345678"
+                    ? "{\"articleDetail\":{\"complexNo\":\"109250\"}}"
+                    : throw new InvalidOperationException("중개인 목록 API가 호출되었습니다."))
     });
     var configuration = new ApiConfiguration
     {
@@ -183,7 +189,8 @@ static void DirectArticleNumbersTakePriority()
         settings,
         CancellationToken.None).GetAwaiter().GetResult();
     Assert(result.Success && result.Rank == 1, "중개인 ID 없는 랭킹 조회");
-    Assert(handler.CallCount == 1, "랭킹 API만 한 번 호출");
+    Assert(result.OwnListing.ComplexNo == "109250", "직접 조회 매물도 단지번호 바인딩");
+    Assert(handler.CallCount == 2, "랭킹 API와 단지번호 상세 API만 호출");
 
     var urlNumbers = NaverLandClient.ParseManualArticleNumbers(
         "https://new.land.naver.com/complexes/109250?ms=2ALvXw,3zh6a4,15&articleNo=2526973862");
@@ -650,6 +657,12 @@ static void BuildArticleLink()
         NaverArticleLinkBuilder.Build(withoutComplex) ==
         "https://new.land.naver.com/?articleNo=2526973862",
         "단지번호 없는 매물 대체 링크");
+
+    // 광고분석 팝업에서 단지번호를 더블 클릭할 때 여는 단지 페이지 주소.
+    Assert(
+        NaverArticleLinkBuilder.BuildComplexLink(" 170818 ") ==
+        "https://new.land.naver.com/complexes/170818",
+        "단지번호 기반 단지 페이지 링크");
 }
 
 static void FormatConsolidatedNotification()
@@ -700,12 +713,12 @@ static void ReconcileCurrentListings()
 {
     var current = new[]
     {
-        new Listing("2600000361", "유지 전", "", "", "", "group", "", "", "", "", true),
+        new Listing("2600000361", "유지 전", "", "", "", "group", "", "", "", "", true) { ComplexNo = "109250" },
         new Listing("2600000362", "삭제", "", "", "", "group", "", "", "", "", true)
     };
     var latest = new[]
     {
-        current[0] with { Address = "유지 최신" },
+        current[0] with { Address = "유지 최신", ComplexNo = "" },
         new Listing("2600000363", "신규", "", "", "", "group", "", "", "", "", false)
     };
 
@@ -713,9 +726,50 @@ static void ReconcileCurrentListings()
 
     Assert(result.Listings.Select(x => x.ArticleNo).SequenceEqual(["2600000361", "2600000363"]), "API 최신 목록 반영");
     Assert(result.Listings[0].Address == "유지 최신", "유지 매물 정보 갱신");
+    Assert(result.Listings[0].ComplexNo == "109250", "재조회 시 기존 단지번호 유지");
     Assert(result.AddedListings.Single().ArticleNo == "2600000363", "신규 항목 추가");
     Assert(result.RemovedListings.Single().ArticleNo == "2600000362", "API 누락 항목 삭제");
     Assert(result.Listings.All(x => x.IsMine), "동기화 목록 내 매물 표시");
+}
+
+static void BindComplexNoDuringRanking()
+{
+    // 랭킹 응답에 단지번호가 없으면 같은 매물을 처리하는 김에 상세 API로 채운다.
+    var detailCallCount = 0;
+    var handler = new StubHandler(request =>
+    {
+        var isRanking = request.RequestUri?.Query.Contains("representativeArticleNo") == true;
+        if (!isRanking) detailCallCount++;
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(isRanking
+                ? "[{\"articleNo\":\"2600000380\"}]"
+                : "{\"articleDetail\":{\"complexNo\":\"109280\"}}")
+        };
+    });
+    using var client = new NaverLandClient(handler);
+    var settings = new AppSettings();
+    var listing = new Listing("2600000380", "단지번호 없음", "", "", "", "group", "", "", "", "", true);
+
+    var result = client.GetRankingAsync(
+        listing,
+        new HashSet<string> { listing.ArticleNo },
+        settings,
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(result.Success && result.Rank == 1, "랭킹 조회 성공");
+    Assert(result.OwnListing.ComplexNo == "109280", "랭킹 처리 중 단지번호 바인딩");
+    Assert(detailCallCount == 1, "상세 API 1회 호출");
+
+    // 이미 단지번호가 있으면 상세 API를 부르지 않는다.
+    var bound = client.GetRankingAsync(
+        listing with { ComplexNo = "109250" },
+        new HashSet<string> { listing.ArticleNo },
+        settings,
+        CancellationToken.None).GetAwaiter().GetResult();
+
+    Assert(bound.OwnListing.ComplexNo == "109250", "기존 단지번호 유지");
+    Assert(detailCallCount == 1, "단지번호 있으면 상세 API 미호출");
 }
 
 static void RunListingAndRankingConcurrently()
@@ -1073,6 +1127,65 @@ static void AnalyzeComplexAdvertisements()
     Assert(top.Select(item => item.Rank).SequenceEqual(new[] { 1, 2, 3 }), "광고 순위 부여");
 }
 
+static void CompareListingPrices()
+{
+    Assert(PriceComparer.Compare("8억", "8억 5,000") > 0, "억 단위 상승");
+    Assert(PriceComparer.Compare("8억 5,000", "8억") < 0, "억 단위 하락");
+    Assert(PriceComparer.Compare("8억", "8억") == 0, "동일 금액");
+    Assert(PriceComparer.Compare("5,000", "6,000") > 0, "만원 단위 상승");
+    Assert(PriceComparer.Compare("6,000", "5,000") < 0, "만원 단위 하락");
+    Assert(PriceComparer.Compare("1억 2,000", "9,000") < 0, "억↔만원 혼합 비교");
+
+    // 월세는 보증금이 같으면 월세로 방향을 판단한다.
+    Assert(PriceComparer.Compare("3,000/50", "3,000/60") > 0, "월세 상승");
+    Assert(PriceComparer.Compare("3,000/60", "3,000/50") < 0, "월세 하락");
+    Assert(PriceComparer.Compare("3,000/50", "5,000/50") > 0, "보증금 상승 우선");
+
+    Assert(PriceComparer.Compare("", "8억") == 0, "빈 값은 비교 불가");
+    Assert(PriceComparer.Compare("협의", "8억") == 0, "숫자 아닌 값은 비교 불가");
+}
+
+static void DetectHighlightedListingChanges()
+{
+    var own = new Listing("2600000401", "내매물", "매매", "8억", "", "", "", "", "", "", true);
+    var rival = new Listing("2600000402", "동일매물", "매매", "8억 5,000", "이웃부동산", "", "", "", "", "")
+    {
+        RegisteredDate = "20260818",
+        VerificationTypeCode = "OWNER"
+    };
+
+    // 직전에 단독매물(동일매물 0건)이었다면 동일생성으로 본다.
+    var soloSnapshot = new ListingSnapshot(1, new Dictionary<string, string>(), 0, DateTime.UtcNow);
+    var withRival = new RankingResult(own, 1, 2, null, null, [own, rival]);
+    Assert(ListingChangeDetector.IsNewDuplicate(withRival, soloSnapshot), "단독→동일생성 감지");
+    Assert(!ListingChangeDetector.IsNewDuplicate(withRival, null), "이전 기록 없으면 동일생성 아님");
+
+    var alreadyDuplicate = new ListingSnapshot(
+        1,
+        new Dictionary<string, string> { ["2600000402"] = "8억 5,000" },
+        1,
+        DateTime.UtcNow);
+    Assert(!ListingChangeDetector.IsNewDuplicate(withRival, alreadyDuplicate), "이미 동일매물이면 동일생성 아님");
+    Assert(ListingChangeDetector.DetectPriceChanges(withRival, alreadyDuplicate).Count == 0, "금액 동일 시 변동 없음");
+
+    var previousPrice = new ListingSnapshot(
+        1,
+        new Dictionary<string, string> { ["2600000402"] = "8억" },
+        1,
+        DateTime.UtcNow);
+    var changes = ListingChangeDetector.DetectPriceChanges(withRival, previousPrice);
+    Assert(changes.Count == 1, "금액변동 감지");
+    Assert(changes[0].ArticleNo == "2600000402", "변동 매물번호");
+    Assert(changes[0].RealtorName == "이웃부동산", "변동 중개업소명");
+    Assert(changes[0].PreviousPrice == "8억" && changes[0].CurrentPrice == "8억 5,000", "이전·변동 금액");
+    Assert(changes[0].RegisteredDate == "20260818", "변동 매물 등록일");
+    Assert(!string.IsNullOrWhiteSpace(changes[0].VerificationType), "변동 매물 검증방식");
+
+    // 내 매물끼리는 금액변동 대상이 아니다.
+    var mineOnly = new RankingResult(own, 1, 2, null, null, [own]);
+    Assert(ListingChangeDetector.DetectPriceChanges(mineOnly, previousPrice).Count == 0, "내 매물은 변동 대상 제외");
+}
+
 static void ParseComplexInformationResponse()
 {
     const string json = """
@@ -1140,6 +1253,43 @@ static void ParseAdvertisementRealtorNamesResponse()
 
     var empty = NaverResponseParser.ParseAdvertisementRealtors("{\"result\":{\"list\":[]}}");
     Assert(empty.Count == 0, "광고 없음 빈 목록");
+}
+
+static void ApplyServerNaverCredentials()
+{
+    // 앱에는 인증값이 없고 로그인 서버가 내려준 값으로 채워진다.
+    var configuration = new ApiConfiguration();
+    Assert(
+        NaverAuthValidator.GetError(configuration) is not null,
+        "인증값이 없으면 조회 불가로 판단");
+    Assert(
+        !NaverCredentialApplier.Apply(configuration, null),
+        "인증값을 못 받으면 적용하지 않음");
+
+    var applied = NaverCredentialApplier.Apply(
+        configuration,
+        new NaverCredentials("Bearer test-token", "NID_AUT=land", "NID_AUT=fin"));
+
+    Assert(applied, "서버 인증값 적용");
+    Assert(NaverAuthValidator.GetError(configuration) is null, "적용 후 조회 가능 상태");
+    Assert(
+        configuration.Ranking.Headers["Authorization"] == "Bearer test-token" &&
+        configuration.Ranking.Headers["Cookie"] == "NID_AUT=land",
+        "랭킹 API에 land 인증값 적용");
+    Assert(
+        configuration.RealtorAdvertisement.Headers["Cookie"] == "NID_AUT=fin",
+        "단지 광고 API에 fin 쿠키 적용");
+
+    // 관리자가 값을 교체하면 다음 접속 확인에서 덮어써진다.
+    NaverCredentialApplier.Apply(
+        configuration,
+        new NaverCredentials("Bearer rotated", "NID_AUT=rotated", string.Empty));
+    Assert(
+        configuration.Ranking.Headers["Authorization"] == "Bearer rotated",
+        "교체된 인증값 반영");
+    Assert(
+        configuration.RealtorAdvertisement.Headers["Cookie"] == "NID_AUT=rotated",
+        "fin 쿠키가 없으면 기본 쿠키 사용");
 }
 
 static void ApplyApiConfiguration()

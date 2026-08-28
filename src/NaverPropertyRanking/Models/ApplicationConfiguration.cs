@@ -13,7 +13,6 @@ public sealed class GoogleAuthenticationConfiguration
     public string WebAppUrl { get; set; } = string.Empty;
     public string PublicIpEndpoint { get; set; } = "https://api.ipify.org";
     public int RequestTimeoutSeconds { get; set; } = 60;
-    public int HeartbeatIntervalSeconds { get; set; } = 120;
 }
 
 public sealed class UpdateConfiguration

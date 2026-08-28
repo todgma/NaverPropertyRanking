@@ -119,3 +119,4 @@ public sealed record AdvertisementFieldComparison(
     string AdvertisementValue,
     string Result,
     string Priority);
+

@@ -3,7 +3,7 @@ using NaverPropertyRanking.Services;
 
 namespace NaverPropertyRanking.UI;
 
-public sealed class PropertyAnalysisForm : Form
+public sealed class PropertyAnalysisForm : Form, IReloadablePopup
 {
     private static readonly HashSet<string> IgnoredKeyFields = new(StringComparer.Ordinal)
     {
@@ -12,7 +12,15 @@ public sealed class PropertyAnalysisForm : Form
         "정보제공사 ID"
     };
 
-    private readonly AdvertisementListingAnalysis _analysis;
+    /// <summary>스크롤해도 최상단에 남기는 행. 순서대로 그리드 맨 위에 고정한다.</summary>
+    private static readonly string[] PinnedFields = ["매물번호", "공인중개사명"];
+
+    private Func<CancellationToken, Task<AdvertisementListingAnalysis>>? _refreshAsync;
+    private readonly CancellationTokenSource _lifetime = new();
+    /// <summary>Dispose가 두 번 불려도 취소 토큰을 다시 건드리지 않게 한다.</summary>
+    private bool _lifetimeReleased;
+    private AdvertisementListingAnalysis _analysis;
+    private readonly Button _refreshButton = new() { Text = "새로고침", Width = 100, Height = 32 };
     private readonly DataGridView _grid = new()
     {
         Dock = DockStyle.Fill,
@@ -37,19 +45,25 @@ public sealed class PropertyAnalysisForm : Form
         ForeColor = Color.FromArgb(55, 70, 65)
     };
 
-    public PropertyAnalysisForm(AdvertisementListingAnalysis analysis)
+    public PropertyAnalysisForm(
+        AdvertisementListingAnalysis analysis,
+        Func<CancellationToken, Task<AdvertisementListingAnalysis>>? refreshAsync = null)
     {
         _analysis = analysis;
+        _refreshAsync = refreshAsync;
         Text = $"물건분석 · {analysis.RankingResult.OwnListing.ArticleNo}";
         StartPosition = FormStartPosition.CenterParent;
         MinimumSize = new Size(980, 520);
         Size = new Size(1380, 760);
         Font = new Font("맑은 고딕", 9F);
         BackColor = Color.White;
+        ShowInTaskbar = true;
 
         ConfigureGrid();
         var closeButton = new Button { Text = "닫기", Width = 90, Height = 32 };
         closeButton.Click += (_, _) => Close();
+        _refreshButton.Enabled = _refreshAsync is not null;
+        _refreshButton.Click += async (_, _) => await RefreshAsync();
         var footer = new FlowLayoutPanel
         {
             Dock = DockStyle.Bottom,
@@ -59,10 +73,69 @@ public sealed class PropertyAnalysisForm : Form
             BackColor = Color.White
         };
         footer.Controls.Add(closeButton);
+        footer.Controls.Add(_refreshButton);
         Controls.Add(_grid);
         Controls.Add(footer);
         Controls.Add(_status);
+        FormClosing += (_, _) => CancelLifetime();
         Shown += (_, _) => LoadComparisons();
+    }
+
+    /// <summary>본 화면이 갱신됐을 때 호출된다. 새로고침 버튼과 같은 동작이다.</summary>
+    public Task ReloadAsync() => RefreshAsync();
+
+    /// <summary>
+    /// 창을 새로 만들지 않고 다른 매물의 분석 결과로 내용을 바꾼다.
+    /// 팝업은 종류마다 하나만 유지하므로 다른 매물을 분석해도 이 창이 갱신된다.
+    /// </summary>
+    public void ShowAnalysis(
+        AdvertisementListingAnalysis analysis,
+        Func<CancellationToken, Task<AdvertisementListingAnalysis>>? refreshAsync)
+    {
+        _analysis = analysis;
+        _refreshAsync = refreshAsync;
+        _refreshButton.Enabled = refreshAsync is not null;
+        Text = $"물건분석 · {analysis.RankingResult.OwnListing.ArticleNo}";
+        LoadComparisons();
+    }
+
+    /// <summary>
+    /// 창이 닫히는 중이면 취소를 알린다.
+    /// Close()와 Dispose에서 모두 불릴 수 있어 이미 정리된 경우에는 아무것도 하지 않는다.
+    /// </summary>
+    private void CancelLifetime()
+    {
+        if (_lifetimeReleased) return;
+        _lifetime.Cancel();
+    }
+
+    /// <summary>동일매물과 상세정보를 다시 조회해 비교표를 갱신한다.</summary>
+    private async Task RefreshAsync()
+    {
+        if (_refreshAsync is null || _lifetimeReleased || IsDisposed) return;
+
+        _refreshButton.Enabled = false;
+        var previousStatus = _status.Text;
+        _status.Text = $"물건분석 다시 조회 중 · {_analysis.RankingResult.OwnListing.ArticleNo}";
+        try
+        {
+            var refreshed = await _refreshAsync(_lifetime.Token);
+            if (IsDisposed) return;
+            _analysis = refreshed;
+            LoadComparisons();
+            _status.Text += $" · {DateTime.Now:HH:mm:ss} 새로고침";
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            if (!IsDisposed) _status.Text = $"다시 조회 실패: {ex.Message} · {previousStatus}";
+        }
+        finally
+        {
+            if (!IsDisposed) _refreshButton.Enabled = true;
+        }
     }
 
     private void ConfigureGrid()
@@ -122,10 +195,12 @@ public sealed class PropertyAnalysisForm : Form
         var comparisons = AdvertisementAnalysisService.BuildFieldComparisons(
             [_analysis],
             2);
+        // 매물번호·공인중개사명은 어느 매물을 비교 중인지 알려주는 기준이라 맨 위로 올려 고정한다.
         var fieldGroups = comparisons
             .GroupBy(
                 item => new { item.Category, item.FieldName },
                 item => item)
+            .OrderBy(group => PinnedFieldOrder(group.Key.FieldName))
             .ToList();
 
         foreach (var fieldGroup in fieldGroups)
@@ -157,10 +232,44 @@ public sealed class PropertyAnalysisForm : Form
                 listing2);
         }
 
+        FreezePinnedRows();
+
         var advertisements = _analysis.TopAdvertisements.OrderBy(item => item.Rank).Take(2).ToList();
         var listing1No = advertisements.ElementAtOrDefault(0)?.Detail.Listing.ArticleNo ?? "없음";
         var listing2No = advertisements.ElementAtOrDefault(1)?.Detail.Listing.ArticleNo ?? "없음";
         _status.Text = $"내매물 {_analysis.RankingResult.OwnListing.ArticleNo} · 매물1 {listing1No} · 매물2 {listing2No}";
+    }
+
+    /// <summary>고정 대상은 앞쪽 순번을, 나머지는 뒤 순번을 줘서 원래 순서를 유지한다.</summary>
+    private static int PinnedFieldOrder(string fieldName)
+    {
+        var index = Array.IndexOf(PinnedFields, fieldName);
+        return index < 0 ? PinnedFields.Length : index;
+    }
+
+    /// <summary>
+    /// 맨 위로 올린 행을 스크롤해도 남도록 고정한다.
+    /// DataGridView는 지정한 행과 그 위의 모든 행을 함께 고정한다.
+    /// </summary>
+    private void FreezePinnedRows()
+    {
+        var pinnedCount = 0;
+        for (var index = 0; index < _grid.Rows.Count && index < PinnedFields.Length; index++)
+        {
+            var fieldName = _grid.Rows[index].Cells["Category"].Value?.ToString();
+            if (Array.IndexOf(PinnedFields, fieldName) < 0) break;
+            pinnedCount = index + 1;
+        }
+        if (pinnedCount == 0) return;
+
+        var lastPinned = _grid.Rows[pinnedCount - 1];
+        lastPinned.Frozen = true;
+        for (var index = 0; index < pinnedCount; index++)
+        {
+            var row = _grid.Rows[index];
+            row.DefaultCellStyle.BackColor = Color.FromArgb(238, 246, 242);
+            row.Cells["Category"].Style.BackColor = Color.FromArgb(226, 238, 232);
+        }
     }
 
     private static void ConfigureComparisonCell(
@@ -184,4 +293,16 @@ public sealed class PropertyAnalysisForm : Form
 
     private static string DisplayValue(string? value) =>
         string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
+
+    protected override void Dispose(bool disposing)
+    {
+        // 모달이 아닌 창은 Close()가 Dispose를 부르고 호출 측에서 또 부를 수 있어 두 번 들어온다.
+        if (disposing && !_lifetimeReleased)
+        {
+            _lifetimeReleased = true;
+            _lifetime.Cancel();
+            _lifetime.Dispose();
+        }
+        base.Dispose(disposing);
+    }
 }
