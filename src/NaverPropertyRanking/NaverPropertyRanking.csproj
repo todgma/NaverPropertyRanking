@@ -9,7 +9,7 @@
     <ApplicationIcon>Assets\ranking-icon.ico</ApplicationIcon>
     <AssemblyName>NaverPropertyRanking</AssemblyName>
     <RootNamespace>NaverPropertyRanking</RootNamespace>
-    <Version>0.1.8</Version>
+    <Version>0.1.9</Version>
   </PropertyGroup>
   <ItemGroup>
     <EmbeddedResource Include="appsettings.json" LogicalName="NaverPropertyRanking.appsettings.json" />
