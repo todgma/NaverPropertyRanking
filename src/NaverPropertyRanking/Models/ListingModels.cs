@@ -14,6 +14,15 @@ public sealed record Listing(
     bool IsMine = false)
 {
     public string ComplexNo { get; init; } = string.Empty;
+    /// <summary>CP(부동산포스)에서 가져온 동. 매물동기화 뒤 채워지고 로컬 캐시에 함께 저장된다.</summary>
+    public string Dong { get; init; } = string.Empty;
+    /// <summary>CP(부동산포스)에서 가져온 호.</summary>
+    public string Ho { get; init; } = string.Empty;
+    /// <summary>
+    /// 동·호를 CP에서 한 번 조회했는지. 토지·상가처럼 동·호가 없는 매물을
+    /// 동기화할 때마다 다시 조회하지 않기 위해 결과와 별개로 기록한다.
+    /// </summary>
+    public bool DongHoChecked { get; init; }
     public string ArticleName { get; init; } = string.Empty;
     public string RealEstateType { get; init; } = string.Empty;
     public string Location { get; init; } = string.Empty;

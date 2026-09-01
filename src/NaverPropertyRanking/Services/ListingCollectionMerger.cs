@@ -85,7 +85,12 @@ public static class ListingCollectionMerger
             : latest;
 
     private static Listing CarryOverComplexNo(Listing latest, Listing existing) =>
-        string.IsNullOrWhiteSpace(latest.ComplexNo) && !string.IsNullOrWhiteSpace(existing.ComplexNo)
-            ? latest with { ComplexNo = existing.ComplexNo }
-            : latest;
+        latest with
+        {
+            ComplexNo = string.IsNullOrWhiteSpace(latest.ComplexNo) ? existing.ComplexNo : latest.ComplexNo,
+            // 동·호는 CP에서 따로 받아 온 값이라 매물목록 재조회로 지워지면 안 된다.
+            Dong = string.IsNullOrWhiteSpace(latest.Dong) ? existing.Dong : latest.Dong,
+            Ho = string.IsNullOrWhiteSpace(latest.Ho) ? existing.Ho : latest.Ho,
+            DongHoChecked = latest.DongHoChecked || existing.DongHoChecked
+        };
 }

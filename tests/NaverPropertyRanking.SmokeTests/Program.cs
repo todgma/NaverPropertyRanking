@@ -1,5 +1,6 @@
 using NaverPropertyRanking.Models;
 using NaverPropertyRanking.Services;
+using NaverPropertyRanking.Services.Security;
 
 var tests = new List<(string Name, Action Run)>
 {
@@ -40,6 +41,19 @@ var tests = new List<(string Name, Action Run)>
     ("단지 정보 응답 파싱", ParseComplexInformationResponse),
     ("단지 광고 중개인 응답 파싱", ParseAdvertisementRealtorNamesResponse),
     ("appsettings API 옵션 적용", ApplyApiConfiguration),
+    ("CP 계정 저장·수정·삭제", PersistCpAccounts),
+    ("CP 접속 테스트 로그인 폼 처리", TestCpLogin),
+    ("부동산포스 접속 테스트", TestRfineLogin),
+    ("CP 목록 구성", CpSiteCatalog),
+    ("부동산뱅크 접속 결과 판정", ReadNeonetLoginResult),
+    ("이실장 접속 결과 판정", ReadAipartnerLoginResult),
+    ("SEED 암호화 기준값", SeedCipherVectors),
+    ("이실장 로그인 본문 구성", BuildAipartnerLoginMessage),
+    ("이실장 암호화 데이터 형식", HybridEncryptEnvelope),
+    ("동·호 응답 파싱", ParseDongHoResponse),
+    ("동·호 표기 변형 파싱", ParseDongHoVariants),
+    ("이실장 동·호 행 파싱", ParseAipartnerDongHo),
+    ("부동산뱅크 동·호 행 파싱", ParseNeonetDongHo),
     ("서버 수신 네이버 인증값 적용", ApplyServerNaverCredentials),
     ("단일 파일용 설정 리소스 포함", EmbeddedConfigurationAvailable)
 };
@@ -1290,6 +1304,422 @@ static void ApplyServerNaverCredentials()
     Assert(
         configuration.RealtorAdvertisement.Headers["Cookie"] == "NID_AUT=rotated",
         "fin 쿠키가 없으면 기본 쿠키 사용");
+}
+
+static void TestCpLogin()
+{
+    const string loginPage = """
+        <html><body><form method="post" action="login.do">
+          <input type="hidden" name="__TOKEN" value="tok-1" />
+          <input type="text" name="mb_id" value="" />
+          <input type="password" name="mb_pw" />
+          <input type="submit" value="로그인" />
+        </form></body></html>
+        """;
+    var site = new CpSite("9", "테스트CP", "https://example.test/Pos/");
+    var account = new CpAccount { CpValue = "1", UserId = "tester", Password = "pw-1234" };
+
+    // 로그인 성공: 응답에 로그인 폼이 없다.
+    string? postedBody = null;
+    var successHandler = new StubHandler(request =>
+    {
+        if (request.Method == HttpMethod.Get)
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            { Content = new StringContent(loginPage) };
+        postedBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        { Content = new StringContent("<html><body>매물관리 홈</body></html>") };
+    });
+    var success = CpLoginTester
+        .TestAsync(site, account, CancellationToken.None, successHandler)
+        .GetAwaiter().GetResult();
+    Assert(success.Success, "로그인 성공 판정");
+    Assert(postedBody!.Contains("mb_id=tester", StringComparison.Ordinal), "아이디 입력란 채움");
+    Assert(postedBody.Contains("mb_pw=pw-1234", StringComparison.Ordinal), "비밀번호 입력란 채움");
+    Assert(postedBody.Contains("__TOKEN=tok-1", StringComparison.Ordinal), "숨은 토큰 함께 전송");
+
+    // 로그인 실패: 응답이 다시 로그인 폼이다.
+    var failureHandler = new StubHandler(_ => new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+    { Content = new StringContent(loginPage) });
+    var failure = CpLoginTester
+        .TestAsync(site, account, CancellationToken.None, failureHandler)
+        .GetAwaiter().GetResult();
+    Assert(!failure.Success, "로그인 실패 판정");
+
+    var missing = CpLoginTester
+        .TestAsync(site, new CpAccount { CpValue = "1" }, CancellationToken.None, failureHandler)
+        .GetAwaiter().GetResult();
+    Assert(!missing.Success, "계정 정보 없으면 실패");
+}
+
+static void TestRfineLogin()
+{
+    // 부동산포스는 로그인 페이지의 csrf_token을 받아 별도 주소로 POST하고 JSON으로 결과를 받는다.
+    const string loginPage =
+        """
+        <html><body><form id="loginform">
+        <input type="hidden" name="csrf_token" id="csrf_token" value="tok-abc" />
+        <input type="text" id="ID" name="ID" />
+        <input type="password" id="Passwd" name="Passwd" />
+        </form></body></html>
+        """;
+    var site = CpSite.Find("1")!;
+    var account = new CpAccount { CpValue = "1", UserId = "od13579", Password = "pw&1234" };
+
+    string? postedBody = null;
+    Uri? postedUrl = null;
+    var handler = new StubHandler(request =>
+    {
+        if (request.Method == HttpMethod.Get)
+            return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            { Content = new StringContent(loginPage) };
+        postedUrl = request.RequestUri;
+        postedBody = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+        return new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                "{\"resultCode\":\"Y\",\"resultMsg\":\"로그인되었습니다\",\"resultUrl\":\"/Pos/index.php\"}")
+        };
+    });
+
+    var success = CpLoginTester.TestAsync(site, account, CancellationToken.None, handler)
+        .GetAwaiter().GetResult();
+    Assert(success.Success, "부동산포스 로그인 성공 판정");
+    Assert(success.Message.Contains("로그인되었습니다", StringComparison.Ordinal), "사이트 안내 문구 표시");
+    Assert(postedUrl!.AbsolutePath == "/process/member.action.php", "로그인 요청 주소");
+    Assert(postedBody!.Contains("Code=loginCheck2", StringComparison.Ordinal), "로그인 코드 전송");
+    Assert(postedBody.Contains("ID=od13579", StringComparison.Ordinal), "아이디 전송");
+    Assert(postedBody.Contains("csrf_token=tok-abc", StringComparison.Ordinal), "보안 토큰 전송");
+
+    var failHandler = new StubHandler(request => request.Method == HttpMethod.Get
+        ? new HttpResponseMessage(System.Net.HttpStatusCode.OK) { Content = new StringContent(loginPage) }
+        : new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+        {
+            Content = new StringContent(
+                "{\"resultCode\":\"N\",\"resultMsg\":\"비밀번호가 일치하지 않습니다\"}")
+        });
+    var failure = CpLoginTester.TestAsync(site, account, CancellationToken.None, failHandler)
+        .GetAwaiter().GetResult();
+    Assert(!failure.Success, "부동산포스 로그인 실패 판정");
+    Assert(failure.Message.Contains("비밀번호가", StringComparison.Ordinal), "실패 사유 그대로 표시");
+}
+
+static void CpSiteCatalog()
+{
+    var sites = CpSite.All;
+    Assert(sites.Count == 3, $"CP는 3개여야 하는데 {sites.Count}개다.");
+    Assert(CpSite.NameOf("1") == "부동산포스", "1번 CP 이름이 다르다.");
+    Assert(CpSite.NameOf("2") == "부동산뱅크", "2번 CP 이름이 다르다.");
+    Assert(CpSite.NameOf("3") == "이실장", "3번 CP 이름이 다르다.");
+    // 접속 주소가 있어야 접속 테스트를 돌릴 수 있다.
+    foreach (var site in sites)
+        Assert(site.CanTestLogin, $"{site.Name}에 로그인 주소가 없다.");
+}
+
+static void ReadNeonetLoginResult()
+{
+    // 실패하면 login_check=no를 달고 로그인 페이지로 되돌린다.
+    const string failure =
+        "<html><head><script>location.href=\"https://www.neonet.co.kr/novo-rebank/view/member/" +
+        "MemberLogin.neo?login_check=no&return_url=%2Fnovo-rebank%2Findex.neo\";</script></head></html>";
+    var failed = CpLoginTester.ReadNeonetResult(failure);
+    Assert(!failed.Success, "실패 응답을 성공으로 봤다.");
+
+    const string success =
+        "<html><head><script>location.href=\"https://www.neonet.co.kr/novo-rebank/index.neo\";</script></head></html>";
+    var passed = CpLoginTester.ReadNeonetResult(success);
+    Assert(passed.Success, $"성공 응답을 실패로 봤다: {passed.Message}");
+
+    // 판단 근거가 없으면 성공으로 넘기지 않는다.
+    Assert(!CpLoginTester.ReadNeonetResult("<html><body>알 수 없음</body></html>").Success,
+        "이동 주소가 없는데 성공으로 봤다.");
+}
+
+static void ReadAipartnerLoginResult()
+{
+    Assert(CpLoginTester.IsPhoneNumberId("01012345678"), "휴대폰번호 아이디를 못 알아봤다.");
+    Assert(CpLoginTester.IsPhoneNumberId("010-1234-5678"), "하이픈이 있는 휴대폰번호를 못 알아봤다.");
+    Assert(!CpLoginTester.IsPhoneNumberId("agent001"), "일반 아이디를 휴대폰번호로 봤다.");
+
+    // 휴대폰번호 아이디는 loginStore가 JSON으로 결과를 준다.
+    var passed = CpLoginTester.ReadAipartnerResult(
+        "{\"result\":true,\"returnUri\":\"https://www.aipartner.com/home\"}");
+    Assert(passed.Success, $"성공 응답을 실패로 봤다: {passed.Message}");
+
+    var failed = CpLoginTester.ReadAipartnerResult(
+        "{\"result\":false,\"message\":\"아이디 혹은 비밀번호가 일치하지 않아요.\"}");
+    Assert(!failed.Success, "실패 응답을 성공으로 봤다.");
+    Assert(failed.Message.Contains("일치하지"), $"사이트 안내를 그대로 전하지 않았다: {failed.Message}");
+
+    // 일반 아이디는 SSO가 숨은 입력값으로 결과를 되돌려 준다.
+    const string ssoFailure =
+        "<form id=\"form-send\"><input id=\"resultCode\" name=\"resultCode\" type=\"hidden\" value=\"000005\" />" +
+        "<input id=\"resultMessage\" name=\"resultMessage\" type=\"hidden\" " +
+        "value=\"ISSAC-Web 데이터 복호화 중 오류가 발생하였습니다.\" /></form>";
+    var ssoFailed = CpLoginTester.ReadAipartnerSsoResult(ssoFailure);
+    Assert(!ssoFailed.Success, "SSO 실패 응답을 성공으로 봤다.");
+    Assert(ssoFailed.Message.Contains("복호화"), $"SSO 안내를 그대로 전하지 않았다: {ssoFailed.Message}");
+
+    const string ssoSuccess =
+        "<form id=\"form-send\"><input name=\"resultCode\" type=\"hidden\" value=\"000000\" />" +
+        "<input name=\"userId\" type=\"hidden\" value=\"agent001\" /></form>";
+    Assert(CpLoginTester.ReadAipartnerSsoResult(ssoSuccess).Success, "SSO 성공 응답을 실패로 봤다.");
+
+    // 공개키 응답에서 공개키와 타임스탬프를 함께 읽어야 한다.
+    var key = CpLoginTester.ReadAipartnerPublicKey(
+        "{\"resultCode\":\"000000\",\"resultData\":{\"timeStamp\":\"2026-08-31T15:34:49.275+09:00[Asia/Seoul]\"," +
+        "\"publicKey\":\"MIIBCQ==\"}}");
+    Assert(key is not null, "공개키 응답을 읽지 못했다.");
+    Assert(key!.Value.PublicKey == "MIIBCQ==", "공개키 값이 다르다.");
+    Assert(key.Value.TimeStamp.StartsWith("2026-08-31T"), "타임스탬프 값이 다르다.");
+    Assert(CpLoginTester.ReadAipartnerPublicKey("{\"resultCode\":\"000009\"}") is null,
+        "실패한 공개키 응답을 읽어들였다.");
+}
+
+static void SeedCipherVectors()
+{
+    // 사이트가 쓰는 암호화 라이브러리(forge seed.js)로 직접 만든 기준값이다.
+    (string Key, string Message, string Expected)[] cases =
+    [
+        ("000102030405060708090a0b0c0d0e0f", "id=test&pw=secret",
+            "a53148031042c1322afcdadba481fc977f8c56116611d9bca5e39ff0fe6e1757"),
+        ("00000000000000000000000000000000", "",
+            "7f54e03d31093785c5e75e41fb77738d"),
+        ("0f0e0d0c0b0a09080706050403020100", "0123456789abcdef0123456789abcdef",
+            "c2c29f207b36c181d8ea67ef2e731ce67d2b78d5b40e3d74a8bf9721ea91e5e9b8f7acb05b93f9402926126f272671f5")
+    ];
+
+    foreach (var (key, message, expected) in cases)
+    {
+        var actual = Convert.ToHexString(SeedCipher.EncryptCbc(
+            System.Text.Encoding.UTF8.GetBytes(message),
+            Convert.FromHexString(key),
+            new byte[16])).ToLowerInvariant();
+        Assert(actual == expected, $"SEED 결과가 기준값과 다르다.{Environment.NewLine}기대: {expected}{Environment.NewLine}실제: {actual}");
+    }
+}
+
+static void BuildAipartnerLoginMessage()
+{
+    // 구분자로 쓰이는 일곱 글자만 바꾼다. 나머지는 그대로 둔다.
+    Assert(IssacWebCrypto.Escape("a b&c+d=e?f|g%h") == "a%20b%26c%2Bd%3De%3Ff%7Cg%25h", "escape 규칙이 다르다.");
+    Assert(IssacWebCrypto.Escape("2026-08-31T15:34:49.275+09:00[Asia/Seoul]")
+        == "2026-08-31T15:34:49.275%2B09:00[Asia/Seoul]", "타임스탬프 escape가 다르다.");
+
+    var message = IssacWebCrypto.BuildLoginMessage(
+        "agent01", "Pw!+123", "2026-08-31T15:34:49.275+09:00[Asia/Seoul]");
+    const string expected =
+        "id=agent01&pw=Pw!%2B123&timeStamp=2026-08-31T15:34:49.275%2B09:00[Asia/Seoul]";
+    Assert(message == expected, $"본문 구성이 다르다.{Environment.NewLine}기대: {expected}{Environment.NewLine}실제: {message}");
+
+    // 이 본문을 SEED로 암호화한 결과도 기준값과 같아야 한다.
+    var actual = Convert.ToHexString(SeedCipher.EncryptCbc(
+        System.Text.Encoding.UTF8.GetBytes(message),
+        Convert.FromHexString("a1b2c3d4e5f60718293a4b5c6d7e8f90"),
+        new byte[16])).ToLowerInvariant();
+    const string expectedCipher =
+        "55e4e268f7106114359db27d6cd8a80d0cfea91c71510a14bf3bcd964b46650e" +
+        "c042a30d873023bfbaa5629cff74cbe1977675478c10a8f8f2286d08e9c0d0b9" +
+        "33cb940024ebc08c8f76f4660d88b9e9";
+    Assert(actual == expectedCipher, $"본문 암호문이 기준값과 다르다.{Environment.NewLine}실제: {actual}");
+}
+
+static void HybridEncryptEnvelope()
+{
+    // 사이트가 기대하는 형태: SEQUENCE { INTEGER 암호화된세션키, OCTET STRING 암호화된본문 }.
+    using var rsa = System.Security.Cryptography.RSA.Create(2048);
+    var publicKey = Convert.ToBase64String(rsa.ExportRSAPublicKey());
+    var sessionKey = Convert.FromHexString("a1b2c3d4e5f60718293a4b5c6d7e8f90");
+    var envelope = Convert.FromBase64String(
+        IssacWebCrypto.HybridEncrypt("id=agent01&pw=secret", publicKey, sessionKey));
+
+    Assert(envelope[0] == 0x30, "바깥이 SEQUENCE가 아니다.");
+    // SEQUENCE 길이 표기(0x82 + 2바이트)를 건너뛰면 INTEGER가 나와야 한다.
+    Assert(envelope[1] == 0x82, "SEQUENCE 길이 표기가 예상과 다르다.");
+    Assert(envelope[4] == 0x02, "첫 항목이 INTEGER가 아니다.");
+    Assert(envelope[5] == 0x82 && envelope[6] == 0x01 && envelope[7] == 0x00,
+        "세션키 암호문 길이가 256바이트가 아니다.");
+    Assert(envelope[8 + 256] == 0x04, "둘째 항목이 OCTET STRING이 아니다.");
+
+    // 서버가 하는 것과 같은 순서로 풀어 원래 세션키가 나오는지 본다.
+    var encryptedKey = envelope[8..(8 + 256)];
+    var recovered = rsa.Decrypt(encryptedKey, System.Security.Cryptography.RSAEncryptionPadding.OaepSHA1);
+    Assert(Convert.ToHexString(recovered) == Convert.ToHexString(sessionKey), "세션키를 되돌리지 못했다.");
+}
+
+static void ParseDongHoVariants()
+{
+    // 실제 CP 목록에서 확인한 표기들. 동·호가 붙어 있는 형태도 있다.
+    (string Address, string Dong, string Ho)[] cases =
+    [
+        ("방배아트자이 103동 602호", "103동", "602호"),
+        ("롯데(987-1) 1동 702호", "1동", "702호"),
+        ("정은루체빌(639-11) 1동 703호", "1동", "703호"),
+        ("466-46 512동502호", "512동", "502호"),
+        ("466-340 508동 202호", "508동", "202호"),
+        ("1127-22 101동 401호", "101동", "401호"),
+        ("557 401호", "", "401호"),
+        ("604-3", "", ""),
+        // 법정동·단지명은 숫자가 없어 동으로 잡히면 안 된다.
+        ("의정부시 가능동", "", ""),
+        ("죽전동 꽃메마을극동스타클래스 201동 402호", "201동", "402호"),
+        ("고양시 일산동구 풍동 미래타운 102동 301호", "102동", "301호")
+    ];
+
+    foreach (var (address, dong, ho) in cases)
+    {
+        var value = DongHoParser.ParseAddress(address);
+        Assert(value.Dong == dong && value.Ho == ho,
+            $"'{address}' → 동 '{value.Dong}' 호 '{value.Ho}' (기대: '{dong}' '{ho}')");
+    }
+}
+
+static void ParseAipartnerDongHo()
+{
+    // 매물광고 결과 표의 행 구조.
+    const string html =
+        "<table><tbody>" +
+        "<tr><td><div class=\"numberA\">67192696</div>" +
+        "<div class=\"numberN\"><i class=\"YJicon\"></i>2646125255</div></td>" +
+        "<td class=\"danjiName\"><p class=\"dongInfo\">방배동</p>" +
+        "<p class=\"fullName\"><span class=\"pre-wrap\">롯데(987-1) 1동 702호</span></p></td></tr>" +
+        "<tr><td><div class=\"numberN\">2646123974</div></td>" +
+        "<td class=\"danjiName\"><p class=\"dongInfo\">방배동</p>" +
+        "<p class=\"fullName\">방배아트자이 103동 602호</p></td></tr>" +
+        "</tbody></table>";
+
+    var first = AipartnerDongHoClient.ParseDongHo(html, "2646125255");
+    Assert(first.Dong == "1동" && first.Ho == "702호", $"첫 행 파싱 실패: {first.Dong}/{first.Ho}");
+
+    // 번호가 맞는 행만 골라야 한다. 순서에 기대면 안 된다.
+    var second = AipartnerDongHoClient.ParseDongHo(html, "2646123974");
+    Assert(second.Dong == "103동" && second.Ho == "602호", $"둘째 행 파싱 실패: {second.Dong}/{second.Ho}");
+
+    Assert(!AipartnerDongHoClient.ParseDongHo(html, "9999999999").HasValue, "없는 번호가 값을 냈다.");
+}
+
+static void ParseNeonetDongHo()
+{
+    // 중개회원 매물 목록의 행 구조. 소재지 칸의 법정동에 걸리면 안 된다.
+    const string html =
+        "<tr class=\"bbs_w\">" +
+        "<td><input type=\"checkbox\" value=\"143320874\"></td><td>1</td>" +
+        "<td><a href=\"javascript:goDetailPop('143320874', 'OP', 'A');\">143320874</a>" +
+        "(<a href=\"javascript:ReportGbn('', '2645543759', '70');\">" +
+        "<span class=\"search-highlight\">2645543759</span></a>)</td>" +
+        "<td>매매</td><td>오피스텔</td>" +
+        "<td><a href=\"#\">의정부시<br>가능동</a></td>" +
+        "<td><a href=\"#\">정은루체빌(639-11)</a></td>" +
+        "<td><div>1동 703호</div></td>" +
+        "<td>71.08B<br>61.6</td><td>19,800</td>" +
+        "</tr>";
+
+    var value = NeonetDongHoClient.ParseDongHo(html, "2645543759");
+    Assert(value.Dong == "1동" && value.Ho == "703호", $"동·호 파싱 실패: {value.Dong}/{value.Ho}");
+    Assert(!NeonetDongHoClient.ParseDongHo(html, "1111111111").HasValue, "없는 번호가 값을 냈다.");
+
+    // 동·호가 없는 매물은 소재지 칸의 법정동을 대신 집어오면 안 된다.
+    const string landRow =
+        "<tr class=\"bbs_w\"><td>1</td>" +
+        "<td><a href=\"javascript:ReportGbn('', '2644413917', '70');\">2644413917</a></td>" +
+        "<td><a href=\"#\">광주시<br>능평동</a></td>" +
+        "<td><a href=\"#\">전원주택</a></td><td><div>604-3</div></td></tr>";
+    Assert(!NeonetDongHoClient.ParseDongHo(landRow, "2644413917").HasValue,
+        "동·호가 없는데 값을 냈다.");
+
+    // 서비스중이 아닌 매물은 네이버 번호가 링크 없이 괄호 안 평문으로만 온다.
+    const string plainRow =
+        "<tr class=\"bbs_w\"><td>1</td>" +
+        "<td><a href=\"javascript:goDetailPop('142425382', 'OP', 'A');\">142425382</a>" +
+        "<br><font style=\"color:#808080;\">(2641185760)</font></td>" +
+        "<td><a href=\"#\">파주시<br>금촌동</a></td><td><a href=\"#\">빌라</a></td>" +
+        "<td><div>466-46 512동502호</div></td></tr>";
+    var plain = NeonetDongHoClient.ParseDongHo(plainRow, "2641185760");
+    Assert(plain.Dong == "512동" && plain.Ho == "502호",
+        $"링크 없는 행 파싱 실패: {plain.Dong}/{plain.Ho}");
+}
+
+static void ParseDongHoResponse()
+{
+    // 목록 API가 돌려주는 JSON에서 상세주소를 읽어 동·호를 뽑는다.
+    const string listJson =
+        """
+        {"Totalpage":1,"data":[{"rNArticle_PK_ID":"2643729286",
+        "FAddr":"죽전동","FAddr2":"꽃메마을극동스타클래스 201동 402호"}]}
+        """;
+
+    var dongHo = RfineDongHoClient.ParseDongHo(listJson);
+    Assert(dongHo.Dong == "201동" && dongHo.Ho == "402호", "목록 응답에서 동·호 파싱");
+    Assert(dongHo.HasValue, "동·호 존재 판정");
+
+    // 단지명에 동이 들어 있어도 뒤쪽 동을 쓴다.
+    var tricky = RfineDongHoClient.ParseAddress("죽전동 극동아파트 105동 1203호");
+    Assert(tricky.Dong == "105동" && tricky.Ho == "1203호", "법정동과 건물 동 구분");
+
+    var noDong = RfineDongHoClient.ParseAddress("자이아파트 302호");
+    Assert(noDong.Dong.Length == 0 && noDong.Ho == "302호", "동이 없으면 호만");
+
+    var none = RfineDongHoClient.ParseDongHo("""{"data":[]}""");
+    Assert(!none.HasValue, "결과가 없으면 빈 값");
+    Assert(!RfineDongHoClient.ParseDongHo("not json").HasValue, "JSON이 아니면 빈 값");
+
+    // 동·호가 있는 매물유형만 조회한다.
+    Assert(RfineDongHoClient.SupportsDongHo("아파트"), "아파트는 조회 대상");
+    Assert(RfineDongHoClient.SupportsDongHo("오피스텔"), "오피스텔은 조회 대상");
+    Assert(RfineDongHoClient.SupportsDongHo("아파트분양권"), "분양권은 조회 대상");
+    Assert(RfineDongHoClient.SupportsDongHo(""), "매물유형을 모르면 조회 대상");
+    Assert(!RfineDongHoClient.SupportsDongHo("토지"), "토지는 조회 제외");
+    Assert(!RfineDongHoClient.SupportsDongHo("토지/임야"), "토지·임야는 조회 제외");
+    Assert(!RfineDongHoClient.SupportsDongHo("상가"), "상가는 조회 제외");
+    Assert(!RfineDongHoClient.SupportsDongHo("단독주택"), "단독주택은 조회 제외");
+    Assert(!RfineDongHoClient.SupportsDongHo("공장/창고"), "공장·창고는 조회 제외");
+
+    // 재조회 시 이미 확인한 매물은 다시 묻지 않는다.
+    var current = new[]
+    {
+        new Listing("2646556701", "내 매물", "", "", "", "group", "", "", "", "", true)
+            { Dong = "201동", Ho = "402호", DongHoChecked = true },
+        new Listing("2646556702", "동·호 없는 토지", "", "", "", "group", "", "", "", "", true)
+            { DongHoChecked = true }
+    };
+    var latest = current.Select(item =>
+        item with { Dong = "", Ho = "", DongHoChecked = false }).ToArray();
+    var merged = ListingCollectionMerger.Reconcile(current, latest).Listings;
+    Assert(merged[0].Dong == "201동" && merged[0].Ho == "402호", "재조회 후에도 동·호 유지");
+    Assert(merged[0].DongHoChecked && merged[1].DongHoChecked, "조회 완료 표시 유지");
+}
+
+static void PersistCpAccounts()
+{
+    var directory = Path.Combine(Path.GetTempPath(), "npr-cp-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try
+    {
+        var store = new CpAccountStore(directory);
+        Assert(store.Load().Count == 0, "최초에는 저장된 계정 없음");
+        Assert(CpSite.Find("1")?.LoginUrl == "https://new.rfine.kr/Pos/login.php", "부동산포스 로그인 주소");
+
+        store.Save("1", " tester ", "pw-1234");
+        var saved = store.Load().Single();
+        Assert(saved.CpValue == "1" && saved.UserId == "tester", "CP 계정 저장·공백 제거");
+        Assert(saved.CpName == "부동산포스", "CP 코드로 이름 표시");
+        Assert(saved.Password == "pw-1234", "저장한 비밀번호 복호화");
+
+        // 파일에는 평문 비밀번호가 남지 않아야 한다.
+        var raw = File.ReadAllText(store.FilePath);
+        Assert(!raw.Contains("pw-1234", StringComparison.Ordinal), "비밀번호 평문 미저장");
+
+        store.Save("1", "tester2", "pw-5678");
+        Assert(store.Load().Count == 1, "같은 CP는 한 계정만 유지");
+        Assert(store.Load().Single().UserId == "tester2", "같은 CP 계정 덮어쓰기");
+
+        store.Remove("1");
+        Assert(store.Load().Count == 0, "CP 계정 삭제");
+    }
+    finally
+    {
+        Directory.Delete(directory, true);
+    }
 }
 
 static void ApplyApiConfiguration()

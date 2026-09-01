@@ -35,6 +35,9 @@ const CURRENT_HASH_PREFIX = 'v2$';
 // 회원가입 시 멤버십 종료일자 기본값: 가입일 다음날(가입 당일 하루 사용 가능).
 const DEFAULT_SIGNUP_MEMBERSHIP_DAYS = 1;
 const DEFAULT_MEMBER_GRADE = 1;
+// 회원가입으로 새로 만드는 계정의 등급. 등급 2부터 광고분석·물건분석을 쓸 수 있다.
+// 등급이 비어 있는 기존 행을 채울 때는 DEFAULT_MEMBER_GRADE(1)를 그대로 쓴다.
+const DEFAULT_SIGNUP_MEMBER_GRADE = 2;
 // 네이버 인증값을 담는 스크립트 속성 이름.
 // 앱에 넣지 않고 로그인·접속 확인 응답으로 내려보내므로, 값이 새면 여기만 바꾸면 된다.
 // 프로젝트 설정 > 스크립트 속성에서 관리한다(스프레드시트나 소스에 남기지 않는다).
@@ -129,7 +132,7 @@ function signUp_(request) {
     const passwordHash = hashPasswordV2_(password, salt);
     sheets.members.appendRow([
       userId, passwordHash, salt, name, now, membershipStart, membershipEnd, allowedPcCount,
-      DEFAULT_MEMBER_GRADE
+      DEFAULT_SIGNUP_MEMBER_GRADE
     ]);
     const memberRow = sheets.members.getLastRow();
     sheets.members.getRange(memberRow, 5).setNumberFormat('yyyy-mm-dd hh:mm:ss');

@@ -58,6 +58,20 @@ public sealed class MainForm : Form
     /// <summary>랭킹 조회 중 그리드·진행 표시를 갱신하는 간격(건수).</summary>
     private readonly Button _loadButton = new() { Text = LoadButtonDefaultText, Width = 125, Height = 32 };
     private readonly Button _refreshButton = new() { Text = RefreshButtonDefaultText, Width = 100, Height = 32, Enabled = false };
+    /// <summary>
+    /// 글자가 길어 해상도·글꼴 배율에 따라 잘릴 수 있다.
+    /// 내용에 맞춰 늘어나게 두고 최소 크기로 바닥을 잡는다.
+    /// </summary>
+    private readonly Button _dongHoButton = new()
+    {
+        Text = "내매물 동호수확인",
+        Height = 32,
+        Enabled = false,
+        AutoSize = true,
+        AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        MinimumSize = new Size(140, 32),
+        Padding = new Padding(10, 0, 10, 0)
+    };
     private readonly Button _retryFailedRankingsButton = new()
     {
         Text = "실패 재조회",
@@ -73,6 +87,7 @@ public sealed class MainForm : Form
         Height = 32,
         Enabled = false
     };
+    private readonly Button _accountSettingsButton = new() { Text = "계정설정", Width = 82, Height = 32 };
     private readonly Button _settingsButton = new() { Text = "설정", Width = 75, Height = 32 };
     private readonly Button _logoutButton = new() { Text = "로그아웃", Width = 82, Height = 32 };
     private readonly Button _excelExportButton = new()
@@ -191,6 +206,12 @@ public sealed class MainForm : Form
     private readonly HashSet<string> _propertyAnalysisInProgress = [];
     /// <summary>열려 있는 데이터 팝업. 같은 매물의 같은 팝업이 중복 생성되지 않게 키로 관리한다.</summary>
     private readonly Dictionary<string, Form> _dataPopups = new(StringComparer.Ordinal);
+    /// <summary>CP 계정 저장소. 실행 파일 옆 파일에 보관한다.</summary>
+    private readonly CpAccountStore _cpAccountStore = new();
+    /// <summary>동·호를 제공하는 CP(부동산포스) 코드.</summary>
+    private const string RfineCpValue = "1";
+    /// <summary>동·호 조회 동시 실행 수. 남의 사이트라 랭킹보다 보수적으로 잡는다.</summary>
+    private const int DongHoConcurrency = 3;
     /// <summary>행 렌더링용 볼드 글꼴. 행마다 새로 만들면 GDI 핸들이 누적돼 대량 조회에서 점점 느려진다.</summary>
     private Font? _gridBoldFont;
     private readonly HashSet<string> _failedRankingArticleNumbers = [];
@@ -213,6 +234,8 @@ public sealed class MainForm : Form
     private bool _autoRetryFailedRankingsRunning;
     private readonly HashSet<string> _lastCompletedRankingTargets = [];
     private bool _hasLoadedListings;
+    /// <summary>동·호 조회에서 실패가 있었는지. 진단 기록을 남길지 정할 때 쓴다.</summary>
+    private bool _dongHoHadFailure;
     private readonly List<RankingNotificationForm> _notificationPopups = [];
     private bool _startingListingWorkflow;
     private string? _loadedListingLoginId;
@@ -317,7 +340,7 @@ public sealed class MainForm : Form
         var searchLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 10,
+            ColumnCount = 12,
             RowCount = 2,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
@@ -326,11 +349,13 @@ public sealed class MainForm : Form
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 62));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 85));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
         searchLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
@@ -375,7 +400,7 @@ public sealed class MainForm : Form
         titleLayout.Controls.Add(noticeTitle, 1, 0);
         titleLayout.Controls.Add(_noticePanel, 2, 0);
         searchLayout.Controls.Add(titleLayout, 0, 0);
-        searchLayout.SetColumnSpan(titleLayout, 10);
+        searchLayout.SetColumnSpan(titleLayout, 12);
 
         var groupLabel = new Label
         {
@@ -393,10 +418,12 @@ public sealed class MainForm : Form
         _saveGroupId.Padding = Padding.Empty;
         _saveGroupId.Margin = Padding.Empty;
 
+        // 한 줄에 놓이는 버튼은 모두 같은 규칙으로 맞춘다.
+        // 하나라도 빠지면 그 버튼만 위아래로 어긋나 보인다.
         foreach (var button in new[]
                  {
-                     _loadButton, _refreshButton, _retryFailedRankingsButton,
-                     _advertisementAnalysisButton, _settingsButton
+                     _loadButton, _dongHoButton, _refreshButton, _retryFailedRankingsButton,
+                     _advertisementAnalysisButton, _accountSettingsButton, _settingsButton, _logoutButton
                  })
         {
             button.Dock = DockStyle.None;
@@ -407,12 +434,14 @@ public sealed class MainForm : Form
         searchLayout.Controls.Add(groupLabel, 0, 1);
         searchLayout.Controls.Add(_groupId, 1, 1);
         searchLayout.Controls.Add(_loadButton, 2, 1);
-        searchLayout.Controls.Add(_refreshButton, 3, 1);
-        searchLayout.Controls.Add(_advertisementAnalysisButton, 4, 1);
-        searchLayout.Controls.Add(_saveGroupId, 5, 1);
-        searchLayout.Controls.Add(_retryFailedRankingsButton, 6, 1);
-        searchLayout.Controls.Add(_settingsButton, 8, 1);
-        searchLayout.Controls.Add(_logoutButton, 9, 1);
+        searchLayout.Controls.Add(_dongHoButton, 3, 1);
+        searchLayout.Controls.Add(_refreshButton, 4, 1);
+        searchLayout.Controls.Add(_advertisementAnalysisButton, 5, 1);
+        searchLayout.Controls.Add(_saveGroupId, 6, 1);
+        searchLayout.Controls.Add(_retryFailedRankingsButton, 7, 1);
+        searchLayout.Controls.Add(_accountSettingsButton, 9, 1);
+        searchLayout.Controls.Add(_settingsButton, 10, 1);
+        searchLayout.Controls.Add(_logoutButton, 11, 1);
         header.Controls.Add(searchLayout);
 
         ConfigureGrid();
@@ -587,6 +616,8 @@ public sealed class MainForm : Form
         _grid.Columns.Add(articleNoColumn);
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "PropertyType", HeaderText = "매물유형", Width = 90 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Address", HeaderText = "매물명/소재지", Width = 280, MinimumWidth = 180 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Dong", HeaderText = "동", Width = 70 });
+        _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Ho", HeaderText = "호", Width = 70 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Trade", HeaderText = "거래유형", Width = 80 });
         _grid.Columns.Add(new DataGridViewTextBoxColumn { Name = "Price", HeaderText = "거래금액", Width = 120 });
         // 등록일은 네이버 확인일(articleConfirmYmd)을 사용한다.
@@ -669,6 +700,12 @@ public sealed class MainForm : Form
             if (!savedOrder.Contains("Duplicates", StringComparer.Ordinal))
                 _grid.Columns["Duplicates"].DisplayIndex = _grid.Columns["Expand"].DisplayIndex;
 
+            // 이전 버전 설정에는 동·호가 없으므로 기본 위치인 매물명/소재지 다음으로 보낸다.
+            if (!savedOrder.Contains("Dong", StringComparer.Ordinal))
+                _grid.Columns["Dong"].DisplayIndex = _grid.Columns["Address"].DisplayIndex + 1;
+            if (!savedOrder.Contains("Ho", StringComparer.Ordinal))
+                _grid.Columns["Ho"].DisplayIndex = _grid.Columns["Dong"].DisplayIndex + 1;
+
             // 저장된 순서에 없는 신규 컬럼은(기존 사용자) 기본 위치로 배치한다.
             if (!savedOrder.Contains("RegisteredDate", StringComparer.Ordinal))
                 _grid.Columns["RegisteredDate"].DisplayIndex =
@@ -740,6 +777,8 @@ public sealed class MainForm : Form
         };
         _retryFailedRankingsButton.Click += async (_, _) => await RetryFailedRankingsAsync();
         _advertisementAnalysisButton.Click += (_, _) => ShowOwnedComplexListPopup();
+        _dongHoButton.Click += async (_, _) => await LoadDongHoAsync();
+        _accountSettingsButton.Click += (_, _) => OpenAccountSettings();
         _settingsButton.Click += (_, _) => OpenSettings();
         _logoutButton.Click += (_, _) => Logout();
         _excelExportButton.Click += (_, _) => ExportCurrentListToExcel();
@@ -1195,6 +1234,8 @@ public sealed class MainForm : Form
                 true,
                 scope,
                 false);
+            // 동·호는 자동으로 가져오지 않는다. 매물동기화 옆 [내매물 동호수확인] 버튼으로 실행한다.
+            // await BindDongHoAsync();
             SaveCurrentListingCache();
             var progress = ListingProgressFormatter.Format(
                 rankingSummary.SuccessCount + rankingSummary.FailureCount,
@@ -1287,6 +1328,8 @@ public sealed class MainForm : Form
         }
         finally
         {
+            // 문제가 있었을 때만 기록을 남긴다. 잘 끝나면 지난 기록도 지운다.
+            CpLoginTrace.Stop(_dongHoHadFailure);
             _refreshing = false;
             EndCancellableOperation();
             SetBusy(false);
@@ -1844,6 +1887,8 @@ public sealed class MainForm : Form
                 $"최신 매물 전체 {_ownListings.Count}건",
                 false);
 
+            // 동·호는 자동으로 가져오지 않는다. 매물동기화 옆 [내매물 동호수확인] 버튼으로 실행한다.
+            // await BindDongHoAsync();
             SetLoadedListingIdentity(_settings.GroupId);
             SaveCurrentListingCache();
             var scope = $"최신 {_ownListings.Count}건 · 신규 {reconciliation.AddedListings.Count}건 · 삭제 {reconciliation.RemovedListings.Count}건";
@@ -1942,6 +1987,170 @@ public sealed class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// 내매물 동호수확인 버튼. 매물 조회와 분리해 사용자가 원할 때만 CP에 요청한다.
+    /// </summary>
+    private async Task LoadDongHoAsync()
+    {
+        if (_refreshing) return;
+        if (_ownListings.Count == 0)
+        {
+            SetStatus("매물동기화를 먼저 실행해 주세요.");
+            return;
+        }
+
+        _refreshing = true;
+        BeginCancellableOperation(CancellableOperationKind.ListingSync);
+        SetBusy(true);
+        // 어디서 막히는지 확인할 수 있도록 이 작업 동안만 기록을 남긴다.
+        _dongHoHadFailure = true;
+        CpLoginTrace.Start();
+        try
+        {
+            await BindDongHoAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            HandleOperationCancelled();
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"동·호 조회 실패: {ex.Message}");
+            MessageBox.Show(this, ex.Message, "내매물 동호수확인", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _refreshing = false;
+            EndCancellableOperation();
+            SetBusy(false);
+        }
+    }
+
+    /// <summary>
+    /// CP(부동산포스)에서 동·호를 받아 목록에 채운다.
+    /// 이미 채워진 매물은 건너뛰므로 두 번째 동기화부터는 신규 매물만 조회한다.
+    /// 계정설정에 CP 계정이 없으면 아무것도 하지 않는다.
+    /// </summary>
+    private async Task BindDongHoAsync()
+    {
+        if (_ownListings.Count == 0) return;
+
+        // 아직 값이 없고, 동·호를 가질 수 있는 매물만 묻는다.
+        // '조회했음' 표시가 아니라 값의 유무로 판단해야 지난번에 실패한 매물을 다시 시도할 수 있다.
+        var pending = _ownListings
+            .Select((listing, index) => (listing, index))
+            .Where(item => string.IsNullOrWhiteSpace(item.listing.Dong) &&
+                           string.IsNullOrWhiteSpace(item.listing.Ho) &&
+                           !string.IsNullOrWhiteSpace(item.listing.ArticleNo) &&
+                           DongHoParser.SupportsDongHo(PropertyTypeDisplay(item.listing)))
+            .ToList();
+        if (pending.Count == 0)
+        {
+            SetStatus("동·호를 새로 확인할 매물이 없습니다.");
+            return;
+        }
+
+        // 저장된 순서대로 CP를 돌면서, 값이 나온 매물은 다음 CP에 다시 묻지 않는다.
+        var accounts = _cpAccountStore.Load()
+            .Where(item => DongHoLookupFactory.Supports(item.CpValue) && item.Password.Length > 0)
+            .ToList();
+        if (accounts.Count == 0)
+        {
+            SetStatus("동·호를 가져오려면 계정설정에서 CP 계정을 등록해 주세요.");
+            return;
+        }
+
+        var total = pending.Count;
+        var found = new Dictionary<int, DongHo>();
+        var failures = new List<string>();
+        var perCp = new List<string>();
+        var remaining = pending;
+
+        foreach (var account in accounts)
+        {
+            if (remaining.Count == 0) break;
+            OperationToken.ThrowIfCancellationRequested();
+
+            using var client = DongHoLookupFactory.Create(account);
+            if (client is null) continue;
+
+            SetStatus($"동·호 확인 중 · {client.CpName} 로그인");
+            var login = await client.EnsureLoggedInAsync(OperationToken);
+            if (!login.Success)
+            {
+                failures.Add($"{client.CpName}: {login.Message}");
+                continue;
+            }
+
+            var asked = remaining.Count;
+            var results = await LookupDongHoAsync(client, remaining, found.Count, total);
+            var hits = 0;
+            foreach (var (index, value) in results)
+            {
+                if (!value.HasValue) continue;
+                found[index] = value;
+                hits++;
+            }
+            // CP별 성적을 남긴다. 로그인은 됐는데 한 건도 못 찾는 경우를 구분하기 위해서다.
+            perCp.Add($"{client.CpName} {hits}/{asked}건");
+
+            remaining = remaining.Where(item => !found.ContainsKey(item.index)).ToList();
+        }
+
+        foreach (var (_, index) in pending)
+        {
+            if (index >= _ownListings.Count || !found.TryGetValue(index, out var value)) continue;
+            _ownListings[index] = _ownListings[index] with
+            {
+                Dong = value.Dong,
+                Ho = value.Ho,
+                DongHoChecked = true
+            };
+        }
+
+        RefreshRankingOwnListingDetails();
+        SaveCurrentListingCache();
+        UpdateCurrentPageResults("랭킹 미조회");
+        RenderGrid();
+
+        _dongHoHadFailure = failures.Count > 0;
+        var detail = perCp.Count == 0 ? string.Empty : $" ({string.Join(", ", perCp)})";
+        var notice = failures.Count == 0
+            ? string.Empty
+            : $" · 실패: {string.Join(" / ", failures)} · 기록: {CpLoginTrace.FilePath}";
+        SetStatus($"동·호 확인 완료 · {found.Count}/{total}건 반영{detail}{notice}");
+    }
+
+    /// <summary>CP 한 곳에 남은 매물을 병렬로 물어본다.</summary>
+    private async Task<List<(int Index, DongHo Value)>> LookupDongHoAsync(
+        IDongHoLookup client,
+        List<(Listing listing, int index)> targets,
+        int alreadyFound,
+        int total)
+    {
+        var completed = 0;
+        using var concurrency = new SemaphoreSlim(DongHoConcurrency, DongHoConcurrency);
+        var results = new (int Index, DongHo Value)[targets.Count];
+
+        async Task LoadOneAsync(int slot, int index, Listing listing)
+        {
+            await concurrency.WaitAsync(OperationToken);
+            try
+            {
+                results[slot] = (index, await client.GetDongHoAsync(listing.ArticleNo, OperationToken));
+            }
+            finally
+            {
+                concurrency.Release();
+                Interlocked.Increment(ref completed);
+                SetProgressStatus($"동·호 확인 중 · {client.CpName} · {alreadyFound + completed}/{total}건");
+            }
+        }
+
+        await Task.WhenAll(targets.Select((item, slot) => LoadOneAsync(slot, item.index, item.listing)));
+        return [.. results];
+    }
+
     private RankingResult SynchronizeOwnListingDetails(RankingResult result)
     {
         var ownIndex = _ownListings.FindIndex(listing =>
@@ -1968,6 +2177,9 @@ public sealed class MainForm : Form
             true)
         {
             ComplexNo = FirstNotEmpty(preferred.ComplexNo, fallback.ComplexNo),
+            Dong = FirstNotEmpty(preferred.Dong, fallback.Dong),
+            Ho = FirstNotEmpty(preferred.Ho, fallback.Ho),
+            DongHoChecked = preferred.DongHoChecked || fallback.DongHoChecked,
             ArticleName = FirstNotEmpty(preferred.ArticleName, fallback.ArticleName),
             RealEstateType = FirstNotEmpty(preferred.RealEstateType, fallback.RealEstateType),
             Location = FirstNotEmpty(preferred.Location, fallback.Location),
@@ -2072,6 +2284,8 @@ public sealed class MainForm : Form
             listing.ArticleNo,
             PropertyTypeDisplay(listing),
             ListingNameDisplay(listing),
+            DisplayOrDash(listing.Dong),
+            DisplayOrDash(listing.Ho),
             listing.TradeType,
             PriceCellDisplay(listing, result),
             RegistrationDateDisplay(listing.RegisteredDate),
@@ -2283,6 +2497,9 @@ public sealed class MainForm : Form
             $"└ {listing.ArticleNo}",
             PropertyTypeDisplay(listing),
             "    " + ListingNameDisplay(listing),
+            // 동·호는 내 매물에만 채운다. 동일매물은 다른 중개사 물건이라 조회하지 않는다.
+            string.Empty,
+            string.Empty,
             listing.TradeType,
             listing.Price,
             RegistrationDateDisplay(listing.RegisteredDate),
@@ -2422,6 +2639,8 @@ public sealed class MainForm : Form
             ["Address"] = ListingNameDisplay(listing),
             ["Trade"] = listing.TradeType,
             ["Price"] = listing.Price,
+            ["Dong"] = isChild ? string.Empty : DisplayOrDash(listing.Dong),
+            ["Ho"] = isChild ? string.Empty : DisplayOrDash(listing.Ho),
             ["RegisteredDate"] = RegistrationDateDisplay(listing.RegisteredDate),
             ["ComplexName"] = ComplexNameDisplay(listing),
             ["QueryResult"] = isChild ? string.Empty : QueryResultDisplay(result),
@@ -3069,6 +3288,15 @@ public sealed class MainForm : Form
         ExitApplication();
     }
 
+    /// <summary>
+    /// 계정설정 팝업. CP 사이트 계정을 등록하고 접속 테스트를 실행한다.
+    /// 다른 팝업과 같은 규칙으로 하나만 유지하며, 종료·로그아웃 시 함께 닫힌다.
+    /// </summary>
+    private void OpenAccountSettings() =>
+        ShowDataPopup(
+            "all",
+            () => new AccountSettingsForm(_cpAccountStore));
+
     private void OpenSettings()
     {
         ShowSettingsDialog();
@@ -3293,6 +3521,8 @@ public sealed class MainForm : Form
         var blocked = _settings.RateLimitBlockedUntilUtc is { } until && until > DateTime.UtcNow;
         _loadButton.Enabled = !_refreshing && !blocked;
         _refreshButton.Enabled = !_refreshing && !blocked && _hasLoadedListings;
+        // 저장된 목록을 복원해 시작한 경우에도 동·호를 바로 확인할 수 있어야 한다.
+        _dongHoButton.Enabled = !_refreshing && !blocked && _hasLoadedListings;
         UpdateRetryFailedRankingsButton(_refreshing);
         UpdatePagingControls();
         if (blocked)
@@ -3566,6 +3796,8 @@ public sealed class MainForm : Form
         _refreshButton.Text = refreshCancels ? CancelOperationButtonText : RefreshButtonDefaultText;
         _loadButton.Enabled = loadCancels || (!busy && !blocked);
         _refreshButton.Enabled = refreshCancels || (!busy && !blocked && _hasLoadedListings);
+        // 동·호는 매물 목록이 있어야 조회할 수 있다.
+        _dongHoButton.Enabled = !busy && !blocked && _hasLoadedListings;
     }
 
     private void SetBusy(bool busy)
@@ -3574,6 +3806,7 @@ public sealed class MainForm : Form
         ApplyOperationButtonState(busy, blocked);
         UpdateRetryFailedRankingsButton(busy);
         _advertisementAnalysisButton.Enabled = !busy && CanUseAdvertisementAnalysis;
+        _accountSettingsButton.Enabled = !busy;
         _settingsButton.Enabled = !busy;
         _logoutButton.Enabled = !busy;
         _excelExportButton.Enabled = !busy && _results.Count > 0;
@@ -3599,6 +3832,7 @@ public sealed class MainForm : Form
         ApplyOperationButtonState(busy, blocked);
         UpdateRetryFailedRankingsButton(busy);
         _advertisementAnalysisButton.Enabled = !busy && CanUseAdvertisementAnalysis;
+        _accountSettingsButton.Enabled = !busy;
         _settingsButton.Enabled = !busy;
         _logoutButton.Enabled = !busy;
         _excelExportButton.Enabled = !busy && _results.Count > 0;
@@ -3817,6 +4051,9 @@ public sealed class MainForm : Form
     }
 
     /// <summary>단지명. 매물 목록 API의 articleName(단지명)을 그대로 쓴다.</summary>
+    private static string DisplayOrDash(string value) =>
+        string.IsNullOrWhiteSpace(value) ? "-" : value.Trim();
+
     private static string ComplexNameDisplay(Listing listing) =>
         string.IsNullOrWhiteSpace(listing.ArticleName) ? "-" : listing.ArticleName.Trim();
 
