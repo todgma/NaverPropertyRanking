@@ -74,7 +74,10 @@ public sealed record NotificationEvent(
     string ArticleNo = "",
     string ListingName = "",
     string TradeSummary = "",
-    NotificationHighlight Highlight = NotificationHighlight.Neutral);
+    NotificationHighlight Highlight = NotificationHighlight.Neutral,
+    string VerificationType = "",
+    string Dong = "",
+    string Ho = "");
 
 /// <summary>동일매물 금액변동 상세. 금액변동확인 팝업에 표시한다.</summary>
 public sealed record PriceChangeDetail(

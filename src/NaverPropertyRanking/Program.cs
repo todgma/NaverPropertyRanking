@@ -14,6 +14,9 @@ internal static class Program
     private static void Main()
     {
         ApplicationConfiguration.Initialize();
+        // EUC-KR처럼 .NET이 기본으로 모르는 인코딩을 쓰는 CP 사이트가 있다.
+        // 앱 시작 때 한 번 등록해 두면 어느 화면에서 호출해도 글자가 깨지지 않는다.
+        System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
         var isFirstInstance = SingleInstanceGuard.TryAcquire(SingleInstanceMutexName, out var instanceGuard);
         using (instanceGuard)
         {

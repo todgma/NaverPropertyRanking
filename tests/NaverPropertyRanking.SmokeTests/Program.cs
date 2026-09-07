@@ -45,6 +45,11 @@ var tests = new List<(string Name, Action Run)>
     ("CP 접속 테스트 로그인 폼 처리", TestCpLogin),
     ("부동산포스 접속 테스트", TestRfineLogin),
     ("CP 목록 구성", CpSiteCatalog),
+    ("아실 접속 결과 판정", ReadAsilLoginResult),
+    ("아실 동·호 파싱", ParseAsilDongHo),
+    ("매물관리센터 동·호 파싱", ParseSunbangDongHo),
+    ("매물관리센터 접속 결과 판정", ReadSunbangLoginResult),
+    ("동·호 CP 순회 병합", MergeDongHoAcrossCps),
     ("부동산뱅크 접속 결과 판정", ReadNeonetLoginResult),
     ("이실장 접속 결과 판정", ReadAipartnerLoginResult),
     ("SEED 암호화 기준값", SeedCipherVectors),
@@ -150,7 +155,8 @@ static void DetectChanges()
     var mine = new Listing("2600000001", "서울시 강남구 · 테스트아파트 · 101동 · 남향 올수리 · 10/20층", "매매", "5억", "우리부동산", "mine", "", "101동", "10/20", "84", true)
     {
         ArticleName = "테스트아파트",
-        Description = "남향 올수리"
+        Description = "남향 올수리",
+        VerificationTypeCode = "OWNER"
     };
     var competitor = new Listing("2600000002", "테스트아파트 101동", "매매", "5억 2,000", "다른부동산", "other", "", "101동", "10/20", "84");
     var result = new RankingResult(mine, 5, 2, "5억", "5억 2,000", [mine, competitor]);
@@ -165,6 +171,11 @@ static void DetectChanges()
     Assert(comparison.Events.All(x => x.ListingName == mine.Address), "모든 변동에 목록과 동일한 매물종류/설명 연결");
     Assert(comparison.Events.All(x => x.TradeSummary == "매매 5억"), "모든 변동에 거래정보 연결");
     Assert(comparison.Events.Single(x => x.Title == "매물 랭킹 변경").Highlight == NotificationHighlight.RankDown, "순위 하락 강조색 분류");
+
+    // 홍보방식은 문구에 섞지 않고 별도 항목으로 넘겨 팝업에서 따로 보여 준다.
+    var rankChange = comparison.Events.Single(x => x.Title == "매물 랭킹 변경");
+    Assert(rankChange.Message == "2위 → 5위", $"순위변동 문구: {rankChange.Message}");
+    Assert(rankChange.VerificationType == "모바일V2", $"순위변동에 홍보방식 연결: {rankChange.VerificationType}");
 }
 
 static void DirectArticleNumbersTakePriority()
@@ -1407,13 +1418,69 @@ static void TestRfineLogin()
 static void CpSiteCatalog()
 {
     var sites = CpSite.All;
-    Assert(sites.Count == 3, $"CP는 3개여야 하는데 {sites.Count}개다.");
+    Assert(sites.Count == 6, $"CP는 6개여야 하는데 {sites.Count}개다.");
     Assert(CpSite.NameOf("1") == "부동산포스", "1번 CP 이름이 다르다.");
     Assert(CpSite.NameOf("2") == "부동산뱅크", "2번 CP 이름이 다르다.");
     Assert(CpSite.NameOf("3") == "이실장", "3번 CP 이름이 다르다.");
-    // 접속 주소가 있어야 접속 테스트를 돌릴 수 있다.
-    foreach (var site in sites)
-        Assert(site.CanTestLogin, $"{site.Name}에 로그인 주소가 없다.");
+    Assert(CpSite.NameOf("4") == "아실", "4번 CP 이름이 다르다.");
+    Assert(CpSite.NameOf("5") == "선방", "5번 CP 이름이 다르다.");
+    Assert(CpSite.NameOf("6") == "우리집 부동산", "6번 CP 이름이 다르다.");
+    Assert(MemulCenterSite.Find("6")!.CpName == "우리집 부동산", "매물관리센터 설정이 없다.");
+
+    // 접속 테스트를 붙여 둔 CP는 주소가 있어야 한다.
+    foreach (var value in new[] { "1", "2", "3", "5", "6" })
+        Assert(CpSite.Find(value)!.CanTestLogin, $"{CpSite.NameOf(value)}에 로그인 주소가 없다.");
+
+    // 등록된 CP는 모두 동·호 조회를 돈다.
+    foreach (var site in CpSite.All)
+        Assert(DongHoLookupFactory.Supports(site.Value), $"{site.Name}이 동·호 조회 대상에서 빠졌다.");
+
+    // 아실은 등록한 아이디가 그대로 주소가 된다.
+    var asil = CpSite.Find("4")!;
+    Assert(asil.RequiresSiteKey, "아실은 아이디를 주소에 써야 한다.");
+    Assert(!CpSite.All.Where(site => site.Value != "4").Any(site => site.RequiresSiteKey),
+        "다른 CP는 아이디를 주소에 넣지 않는다.");
+
+    // 전체 주소를 붙여 넣어도 앞부분만 남겨 쓴다.
+    Assert(CpSite.NormalizeSiteKey("02-536-6700") == "02-536-6700", "아이디만 입력한 경우");
+    Assert(CpSite.NormalizeSiteKey("https://02-536-6700.asil.kr/member_adm/login/login.jsp")
+        == "02-536-6700", "전체 주소를 붙여 넣은 경우");
+    Assert(CpSite.NormalizeSiteKey("02-536-6700.asil.kr") == "02-536-6700", "도메인만 입력한 경우");
+    Assert(CpSite.NormalizeSiteKey("  ") == string.Empty, "빈 값");
+
+    Assert(asil.ResolveLoginUrl("02-536-6700")
+        == "https://02-536-6700.asil.kr/member_adm/login/login.jsp", "아실 로그인 주소 조합");
+    Assert(asil.ResolveLoginUrl(string.Empty) == string.Empty, "아이디가 없으면 주소를 만들 수 없다.");
+
+    // 아이디가 그대로 주소가 되므로 계정만으로 로그인 주소가 완성된다.
+    var asilAccount = new CpAccount { CpValue = "4", UserId = "02-536-6700", Password = "secret" };
+    Assert(asilAccount.LoginUrl == "https://02-536-6700.asil.kr/member_adm/login/login.jsp",
+        $"아실 계정 로그인 주소: {asilAccount.LoginUrl}");
+
+    // 아이디가 비면 접속 테스트를 안내로 막는다.
+    var asilResult = CpLoginTester.TestAsync(
+        asil,
+        new CpAccount { CpValue = "4", UserId = " ", Password = "secret" },
+        CancellationToken.None).GetAwaiter().GetResult();
+    Assert(!asilResult.Success, $"아이디 없이 성공으로 봤다: {asilResult.Message}");
+}
+
+static void ReadAsilLoginResult()
+{
+    // 실패하면 안내창을 띄우고 로그인 화면으로 되돌린다.
+    const string failure =
+        "<script language=\"javascript\"> localStorage.removeItem(\"autoLogin\");" +
+        " alert('비밀번호가 맞지 않습니다.\n비밀번호를 잊으신 회원께서는 고객센터로 연락주시기 바랍니다." +
+        "\n\n(고객센터 : 070-4192-3583)');" +
+        " self.location.href=\"/member_adm/login/login.jsp\"; </script>";
+    var failed = CpLoginTester.ReadAsilResult(failure);
+    Assert(!failed.Success, "실패 응답을 성공으로 봤다.");
+    Assert(failed.Message.StartsWith("비밀번호가 맞지 않습니다"), $"안내 문구를 그대로 전하지 않았다: {failed.Message}");
+
+    // 성공하면 로그인 화면으로 되돌리지 않는다.
+    const string success =
+        "<script language=\"javascript\"> self.location.href=\"/member_adm/main/main.jsp\"; </script>";
+    Assert(CpLoginTester.ReadAsilResult(success).Success, "성공 응답을 실패로 봤다.");
 }
 
 static void ReadNeonetLoginResult()
@@ -1637,6 +1704,163 @@ static void ParseNeonetDongHo()
     var plain = NeonetDongHoClient.ParseDongHo(plainRow, "2641185760");
     Assert(plain.Dong == "512동" && plain.Ho == "502호",
         $"링크 없는 행 파싱 실패: {plain.Dong}/{plain.Ho}");
+}
+
+static void ParseAsilDongHo()
+{
+    // 목록에서 아실 매물번호를 찾는다. 검색한 네이버 번호 자신은 건너뛴다.
+    const string listHtml =
+        "<a href=\"memulReRegForm.asp?s_step=nfail&mm_uid=41690224&url=undefined" +
+        "&s_mm_uid=2647258231&srch_order_flag=1\">상세</a>";
+    Assert(AsilDongHoClient.ParseAsilArticleNo(listHtml, "2647258231") == "41690224",
+        "아실 매물번호를 찾지 못했다.");
+    Assert(AsilDongHoClient.ParseAsilArticleNo("<a href=\"x.asp?mm_uid=2647258231\">", "2647258231") is null,
+        "검색한 번호를 아실 번호로 잘못 읽었다.");
+
+    // 목록 행에도 "단지명 207동 402호 (4층)" 형태로 동·호가 들어 있다.
+    const string listRow =
+        "<td><a href=\"javascript:viewMemul('41484818')\" class=\"txBlue\" title=\" 평택시 장안동\">" +
+        "브레인시티2BL로제비앙엘가더퍼스트<br>207동 402호 (4층)</a></td>";
+    var fromList = AsilDongHoClient.ParseListDongHo(listRow);
+    Assert(fromList.Dong == "207동" && fromList.Ho == "402호",
+        $"목록 행 파싱 실패: {fromList.Dong}/{fromList.Ho}");
+    Assert(AsilDongHoClient.ParseAsilArticleNo(listRow, "2645932269") == "41484818",
+        "상세 링크에서 아실 매물번호를 못 읽었다.");
+
+    // 상세는 아실번호로 열어야 한다. 같은 행에서 번호와 동·호를 함께 읽는다.
+    var row = AsilDongHoClient.ParseListRow(listRow, "2645932269");
+    Assert(row.AsilNo == "41484818", $"행에서 아실번호를 못 읽었다: {row.AsilNo}");
+    Assert(row.Value.Dong == "207동" && row.Value.Ho == "402호",
+        $"행에서 동·호를 못 읽었다: {row.Value.Dong}/{row.Value.Ho}");
+
+    // 링크에 네이버 번호가 실린 화면은 상세 주소로 쓰지 않는다.
+    var sameNumber = AsilDongHoClient.ParseListRow(
+        "<td><a href=\"javascript:viewMemul('2645932269')\">단지<br>207동 402호</a></td>", "2645932269");
+    Assert(sameNumber.AsilNo is null, "검색한 번호를 아실번호로 썼다.");
+
+    // 링크가 없는 칸(면적·가격 등)은 보지 않는다.
+    Assert(!AsilDongHoClient.ParseListDongHo("<td>207동 402호</td>").HasValue,
+        "링크 없는 칸을 읽었다.");
+
+    // 같은 칸에 메모가 붙어 와도 링크 안쪽만 읽어야 한다.
+    const string rowWithMemo =
+        "<td><a href=\"javascript:viewMemul('41484818')\" class=\"txBlue\">" +
+        "브레인시티2BL로제비앙엘가더퍼스트<br>207동 402호 (4층)</a>" +
+        "<div>복사 수정 보기</div><div>마피8천 105동 문의주세요</div></td>";
+    var ignoringMemo = AsilDongHoClient.ParseListDongHo(rowWithMemo);
+    Assert(ignoringMemo.Dong == "207동" && ignoringMemo.Ho == "402호",
+        $"메모를 읽었다: {ignoringMemo.Dong}/{ignoringMemo.Ho}");
+
+    // 상세 화면은 매물명 칸에 동·호가 함께 들어 있다.
+    const string detailHtml =
+        "<tr> <th>소재지</th> <td>경기도 평택시 장안동</td> " +
+        "<th>매물명</th> " +
+        "<td title=\"402\">브레인시티2BL로제비앙엘가더퍼스트 207동 402호<br> " +
+        "<!--   [402] --> </td> </tr>";
+    var value = AsilDongHoClient.ParseDongHo(detailHtml);
+    Assert(value.Dong == "207동" && value.Ho == "402호", $"동·호 파싱 실패: {value.Dong}/{value.Ho}");
+
+    // 소재지의 법정동(장안동)을 동으로 읽으면 안 된다.
+    Assert(value.Dong != "장안동", "법정동을 동으로 읽었다.");
+
+    // 매물명에 동만 있는 경우도 있다.
+    const string dongOnlyHtml =
+        "<tr><th>매물명</th><td>한강아파트 3동</td></tr>";
+    var dongOnly = AsilDongHoClient.ParseDongHo(dongOnlyHtml);
+    Assert(dongOnly.Dong == "3동" && dongOnly.Ho.Length == 0, $"동만 있는 경우: {dongOnly.Dong}/{dongOnly.Ho}");
+
+    // 등록 화면이 대신 열리면 입력란에서 읽는다.
+    // 콤보 값(174117)은 건물 일련번호라 동으로 쓰면 안 된다.
+    const string formHtml =
+        "<select id=\"bld_no\" name=\"bld_no\">" +
+        "<option value=\"174117\" dong_nm=\"104\" selected>104</option></select>" +
+        "<input type=\"text\" id=\"dong_nm\" name=\"dong_nm\" value=\"104\" style=\"display:none;\">" +
+        "<input type=\"text\" id=\"adr_ho\" name=\"adr_ho\" value=\"702\">";
+    var fromForm = AsilDongHoClient.ParseDongHo(formHtml);
+    Assert(fromForm.Dong == "104동" && fromForm.Ho == "702호", $"등록 화면 파싱 실패: {fromForm.Dong}/{fromForm.Ho}");
+    Assert(fromForm.Dong != "174117동", "건물 일련번호를 동으로 읽었다.");
+
+    // 아무 값도 없으면 빈 값으로 둔다.
+    Assert(!AsilDongHoClient.ParseDongHo("<tr><th>매물명</th><td>이름없는건물</td></tr>").HasValue,
+        "빈 값인데 값이 나왔다.");
+
+}
+
+static void MergeDongHoAcrossCps()
+{
+    // CP를 순서대로 돌며 빈 자리만 채운다. 이미 있는 값은 덮어쓰지 않는다.
+    static DongHo Fill(DongHo current, DongHo incoming) =>
+        new(current.Dong.Length > 0 ? current.Dong : incoming.Dong,
+            current.Ho.Length > 0 ? current.Ho : incoming.Ho);
+    static bool IsComplete(DongHo value) => value.Dong.Length > 0 && value.Ho.Length > 0;
+
+    // 아실은 동만 준다. 다음 CP에서 호를 받아 채운다.
+    var afterAsil = Fill(DongHo.Empty, new DongHo("104동", string.Empty));
+    Assert(afterAsil.Dong == "104동" && afterAsil.Ho.Length == 0, "동만 채워져야 한다.");
+    Assert(!IsComplete(afterAsil), "동만 있으면 아직 완성이 아니다.");
+
+    var afterNext = Fill(afterAsil, new DongHo("999동", "702호"));
+    Assert(afterNext.Dong == "104동", "먼저 받은 동을 덮어쓰면 안 된다.");
+    Assert(afterNext.Ho == "702호", "빈 호를 채우지 못했다.");
+    Assert(IsComplete(afterNext), "둘 다 찼으면 완성이어야 한다.");
+
+    // 완성된 매물은 그대로 둔다.
+    var untouched = Fill(afterNext, new DongHo("101동", "101호"));
+    Assert(untouched == afterNext, "완성된 값이 바뀌었다.");
+
+    // 아무것도 못 받으면 그대로다.
+    Assert(Fill(afterAsil, DongHo.Empty) == afterAsil, "빈 결과가 값을 지웠다.");
+}
+
+static void ParseSunbangDongHo()
+{
+    // 등록매물 목록: 주소가 여러 줄로 들어 있고 층 정보가 뒤에 붙는다.
+    const string listRow =
+        "<td style=\"text-align:left\">아파트</td>" +
+        "<td style=\"text-align:left;padding-left:10px;\">602</td>" +
+        "<td style=\"text-align:left;padding-left:10px;\">" +
+        "<a href=\"javascript:viewMemul('7548666')\" class=\"txBlue\">" +
+        "용산구 한강로1가<br>용산파크자이<br>A동 602호 (6층)</a></td>";
+    var value = MemulCenterDongHoClient.ParseDongHo(listRow);
+    Assert(value.Dong == "A동" && value.Ho == "602호", $"등록매물 파싱 실패: {value.Dong}/{value.Ho}");
+
+    // 등록종료 목록: 동·호만 링크 안에 있고 층은 링크 밖에 있다.
+    const string endRow =
+        "<td style=\"border-bottom: 0px solid;text-align:left;\">아파트</td>" +
+        "<td style=\"border-bottom: 0px solid; padding-left:5px;text-align:left;\">" +
+        "<a class=\"txBlue\" href=\"javascript:viewMemul('7474080')\">105동 1702호</a> (17층)</td>";
+    var ended = MemulCenterDongHoClient.ParseDongHo(endRow);
+    Assert(ended.Dong == "105동" && ended.Ho == "1702호", $"등록종료 파싱 실패: {ended.Dong}/{ended.Ho}");
+
+    // 링크가 없는 칸(매물종류·면적 등)은 보지 않는다.
+    Assert(!MemulCenterDongHoClient.ParseDongHo("<td>아파트</td><td>102동 301호</td>").HasValue,
+        "링크 없는 칸을 읽었다.");
+
+    // 우리집부동산은 동·호가 전용 칸에 들어 있고 사이에 &nbsp;가 낀다.
+    const string dnghRow =
+        "<td style=\"border-bottom: 0px;\">" +
+        "<a href=\"javascript:viewMemul('3693631')\" class=\"txBlue\">" +
+        "<span class=\"dngh\">101동 &nbsp;103호 </span><br>" +
+        "<span class=\"floor\">(저) </span></a></td>";
+    var dngh = MemulCenterDongHoClient.ParseDongHo(dnghRow);
+    Assert(dngh.Dong == "101동" && dngh.Ho == "103호", $"전용 칸 파싱 실패: {dngh.Dong}/{dngh.Ho}");
+    Assert(dngh.Ho != "3693631호", "매물번호를 호로 읽었다.");
+
+    // 동·호가 없는 매물은 빈 값으로 둔다.
+    Assert(!MemulCenterDongHoClient.ParseDongHo(
+        "<td><a href=\"javascript:viewMemul('1')\">용산구 한강로1가<br>단독주택</a></td>").HasValue,
+        "동·호가 없는데 값이 나왔다.");
+}
+
+static void ReadSunbangLoginResult()
+{
+    var failed = CpLoginTester.ReadMemulCenterResult(
+        "<script language=javascript> alert(\"아이디 비밀번호가 일치하지 않습니다.\"); history.go(-1); </script>");
+    Assert(!failed.Success, "실패 응답을 성공으로 봤다.");
+    Assert(failed.Message.Contains("일치하지"), $"안내 문구를 그대로 전하지 않았다: {failed.Message}");
+
+    Assert(CpLoginTester.ReadMemulCenterResult("<html><body>매물관리센터</body></html>").Success,
+        "성공 응답을 실패로 봤다.");
 }
 
 static void ParseDongHoResponse()

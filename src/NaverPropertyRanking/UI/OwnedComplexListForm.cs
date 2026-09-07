@@ -113,6 +113,8 @@ public sealed class OwnedComplexListForm : Form
         _groupId = groupId.Trim();
         Text = "광고분석 · 단지 목록";
         StartPosition = FormStartPosition.CenterScreen;
+        // 다른 데이터 팝업과 같게 맞춘다. 작업표시줄에 있어야 앞으로 불러오기 쉽다.
+        ShowInTaskbar = true;
         MinimumSize = new Size(1000, 540);
         Size = new Size(1320, 760);
         Font = new Font("맑은 고딕", 9F);

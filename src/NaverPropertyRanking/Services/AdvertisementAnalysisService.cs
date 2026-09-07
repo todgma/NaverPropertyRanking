@@ -176,8 +176,7 @@ public static class AdvertisementAnalysisService
                 Add("시설정보", "사용승인일", own.BuildingUseApprovalYmd, other.BuildingUseApprovalYmd, "낮음", CompareDate);
                 Add("광고정보", "사진 수", NullableNumber(own.PhotoCount), NullableNumber(other.PhotoCount), "높음", CompareNumber);
                 Add("광고정보", "매물 특징", own.Listing.Description, other.Listing.Description, "필수");
-                Add("검증정보", "확인매물 유형 코드", own.VerificationTypeCode, other.VerificationTypeCode, "높음");
-                Add("검증정보", "확인매물 유형명", own.VerificationTypeName, other.VerificationTypeName, "높음");
+                // 확인매물 유형 코드·유형명은 아래 검증방식과 같은 값이라 표시하지 않는다.
                 Add(
                     "검증정보",
                     "검증방식",

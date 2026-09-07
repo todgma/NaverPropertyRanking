@@ -62,7 +62,7 @@ public sealed class AccountSettingsForm : Form
 
         foreach (var site in CpSite.All) _cpCombo.Items.Add(site);
         if (_cpCombo.Items.Count > 0) _cpCombo.SelectedIndex = 0;
-        _saveButton.Click += (_, _) => SaveAccount();
+        _saveButton.Click += async (_, _) => await SaveAccountAsync();
         _cpCombo.SelectedIndexChanged += (_, _) => LoadSelectedCpIntoInputs();
         _grid.CellClick += GridOnCellClick;
 
@@ -241,9 +241,15 @@ public sealed class AccountSettingsForm : Form
             .FirstOrDefault(account => string.Equals(account.CpValue, site.Value, StringComparison.Ordinal));
         _userId.Text = saved?.UserId ?? string.Empty;
         _password.Text = saved?.Password ?? string.Empty;
+        // 아실은 아이디가 그대로 주소가 되므로 어떤 형태로 넣어야 하는지 알려 준다.
+        _userId.PlaceholderText = site.RequiresSiteKey ? "예: 02-536-6700" : string.Empty;
     }
 
-    private void SaveAccount()
+    /// <summary>
+    /// 계정을 저장하고 바로 접속 테스트까지 진행한다.
+    /// 저장만 하고 넘어가면 잘못 입력한 걸 나중에 조회할 때야 알게 된다.
+    /// </summary>
+    private async Task SaveAccountAsync()
     {
         if (_cpCombo.SelectedItem is not CpSite site)
         {
@@ -263,9 +269,17 @@ public sealed class AccountSettingsForm : Form
             return;
         }
 
+        if (site.RequiresSiteKey && CpSite.NormalizeSiteKey(_userId.Text).Length == 0)
+        {
+            _status.Text = $"{site.Name}은(는) 주소로 쓸 아이디를 입력해야 합니다. 예: 02-536-6700";
+            _userId.Focus();
+            return;
+        }
+
+        List<CpAccount> saved;
         try
         {
-            _store.Save(site.Value, _userId.Text, _password.Text);
+            saved = _store.Save(site.Value, _userId.Text, _password.Text);
             LoadAccounts();
             _status.Text = $"{site.Name} 계정을 저장했습니다 · {_store.FilePath}";
         }
@@ -273,7 +287,13 @@ public sealed class AccountSettingsForm : Form
         {
             _status.Text = $"저장 실패: {ex.Message}";
             MessageBox.Show(this, ex.Message, "계정설정", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
         }
+
+        // 저장한 계정으로 곧바로 접속을 확인한다.
+        var account = saved.FirstOrDefault(item =>
+            string.Equals(item.CpValue, site.Value, StringComparison.Ordinal));
+        if (account is not null) await RunLoginTestAsync(account);
     }
 
     /// <summary>
@@ -294,7 +314,9 @@ public sealed class AccountSettingsForm : Form
             return;
         }
 
+        // 테스트가 도는 동안에는 저장·목록 조작을 막는다. 두 번 겹쳐 돌지 않게 하기 위해서다.
         _grid.Enabled = false;
+        _saveButton.Enabled = false;
         _status.BackColor = Color.FromArgb(247, 250, 249);
         _status.ForeColor = Color.FromArgb(55, 70, 65);
         _status.Text = $"{site.Name} 접속 테스트 중... · {account.UserId}";
@@ -320,7 +342,11 @@ public sealed class AccountSettingsForm : Form
         }
         finally
         {
-            if (!IsDisposed) _grid.Enabled = true;
+            if (!IsDisposed)
+            {
+                _grid.Enabled = true;
+                _saveButton.Enabled = true;
+            }
         }
     }
 

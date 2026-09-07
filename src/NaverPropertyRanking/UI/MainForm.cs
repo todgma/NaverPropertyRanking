@@ -87,6 +87,7 @@ public sealed class MainForm : Form
         Height = 32,
         Enabled = false
     };
+    private readonly Button _columnSettingsButton = new() { Text = "항목설정", Width = 82, Height = 32 };
     private readonly Button _accountSettingsButton = new() { Text = "계정설정", Width = 82, Height = 32 };
     private readonly Button _settingsButton = new() { Text = "설정", Width = 75, Height = 32 };
     private readonly Button _logoutButton = new() { Text = "로그아웃", Width = 82, Height = 32 };
@@ -227,7 +228,8 @@ public sealed class MainForm : Form
     private AppSettings _settings;
     private bool _refreshing;
     private bool _reallyExit;
-    private bool _hideTipShown;
+    /// <summary>트레이로 내리기 직전의 창 크기 상태. 다시 열 때 그대로 돌려준다.</summary>
+    private FormWindowState _restoreWindowState = FormWindowState.Normal;
     private DateTime? _lastRateLimitNoticeUntilUtc;
     private DateTime? _lastRankingCompletedUtc;
     private DateTime? _nextScheduledRefreshUtc;
@@ -340,7 +342,7 @@ public sealed class MainForm : Form
         var searchLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 12,
+            ColumnCount = 13,
             RowCount = 2,
             Margin = Padding.Empty,
             Padding = Padding.Empty,
@@ -354,10 +356,11 @@ public sealed class MainForm : Form
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 110));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 20));
         searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 85));
-        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));   // 남는 여백
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));   // 항목설정
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));   // 계정설정
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 85));   // 설정
+        searchLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 90));   // 로그아웃
         searchLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
         searchLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
 
@@ -400,7 +403,7 @@ public sealed class MainForm : Form
         titleLayout.Controls.Add(noticeTitle, 1, 0);
         titleLayout.Controls.Add(_noticePanel, 2, 0);
         searchLayout.Controls.Add(titleLayout, 0, 0);
-        searchLayout.SetColumnSpan(titleLayout, 12);
+        searchLayout.SetColumnSpan(titleLayout, 13);
 
         var groupLabel = new Label
         {
@@ -423,7 +426,8 @@ public sealed class MainForm : Form
         foreach (var button in new[]
                  {
                      _loadButton, _dongHoButton, _refreshButton, _retryFailedRankingsButton,
-                     _advertisementAnalysisButton, _accountSettingsButton, _settingsButton, _logoutButton
+                     _advertisementAnalysisButton, _columnSettingsButton, _accountSettingsButton,
+                     _settingsButton, _logoutButton
                  })
         {
             button.Dock = DockStyle.None;
@@ -439,17 +443,21 @@ public sealed class MainForm : Form
         searchLayout.Controls.Add(_advertisementAnalysisButton, 5, 1);
         searchLayout.Controls.Add(_saveGroupId, 6, 1);
         searchLayout.Controls.Add(_retryFailedRankingsButton, 7, 1);
-        searchLayout.Controls.Add(_accountSettingsButton, 9, 1);
-        searchLayout.Controls.Add(_settingsButton, 10, 1);
-        searchLayout.Controls.Add(_logoutButton, 11, 1);
+        searchLayout.Controls.Add(_columnSettingsButton, 9, 1);
+        searchLayout.Controls.Add(_accountSettingsButton, 10, 1);
+        searchLayout.Controls.Add(_settingsButton, 11, 1);
+        searchLayout.Controls.Add(_logoutButton, 12, 1);
         header.Controls.Add(searchLayout);
 
         ConfigureGrid();
         var content = new Panel { Dock = DockStyle.Fill, BackColor = Color.White };
         var sortPanel = BuildSortPanel();
         var pagingPanel = BuildPagingPanel();
+        var statusPanel = BuildStatusPanel();
         content.Controls.Add(_grid);
+        // 아래쪽에 붙는 것부터 차례로 넣는다. 상태 줄이 가장 아래에 온다.
         content.Controls.Add(pagingPanel);
+        content.Controls.Add(statusPanel);
         content.Controls.Add(sortPanel);
 
         Controls.Add(content);
@@ -527,13 +535,42 @@ public sealed class MainForm : Form
         }
         _excelExportButton.Anchor = AnchorStyles.None;
         _excelExportButton.Margin = new Padding(6, 6, 10, 6);
-        // 최종조회일시를 진행 상태 바로 앞에 붙여 한 줄에서 함께 읽히게 한다.
-        _lastChecked.AutoSize = true;
+        // 최종조회일시와 진행 상태는 창 맨 아래 상태 줄로 옮겼다.
         container.Controls.Add(optionsPanel, 0, 0);
-        container.Controls.Add(_lastChecked, 1, 0);
-        container.Controls.Add(_progressStatus, 2, 0);
+        container.SetColumnSpan(optionsPanel, 3);
         container.Controls.Add(_excelExportButton, 3, 0);
         return container;
+    }
+
+    /// <summary>
+    /// 창 맨 아래 상태 줄. 왼쪽에 최종조회일시, 오른쪽에 진행 상태를 둔다.
+    /// </summary>
+    private Control BuildStatusPanel()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Bottom,
+            Height = 30,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = Padding.Empty,
+            Padding = new Padding(12, 0, 12, 0),
+            BackColor = Color.FromArgb(240, 245, 243)
+        };
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        _lastChecked.AutoSize = true;
+        _lastChecked.TextAlign = ContentAlignment.MiddleLeft;
+        _lastChecked.Anchor = AnchorStyles.Left;
+        _lastChecked.Margin = new Padding(0, 0, 16, 0);
+
+        _progressStatus.TextAlign = ContentAlignment.MiddleRight;
+        _progressStatus.Margin = new Padding(0, 0, 0, 0);
+
+        panel.Controls.Add(_lastChecked, 0, 0);
+        panel.Controls.Add(_progressStatus, 1, 0);
+        return panel;
     }
 
     private Control BuildPagingPanel()
@@ -661,6 +698,7 @@ public sealed class MainForm : Form
             column.SortMode = DataGridViewColumnSortMode.Programmatic;
         }
         ApplySavedGridColumnOrder();
+        ApplySavedGridColumnVisibility();
     }
 
     private void ApplySavedGridColumnOrder()
@@ -713,6 +751,77 @@ public sealed class MainForm : Form
             if (!savedOrder.Contains("QueryResult", StringComparer.Ordinal))
                 _grid.Columns["QueryResult"].DisplayIndex =
                     _grid.Columns["PreviousRank"].DisplayIndex;
+        }
+        finally
+        {
+            _applyingColumnOrder = false;
+        }
+    }
+
+    /// <summary>저장해 둔 표시여부를 목록에 적용한다. 목록에 없는 항목은 보이는 상태로 둔다.</summary>
+    private void ApplySavedGridColumnVisibility()
+    {
+        var hidden = (_settings.HiddenGridColumns ?? []).ToHashSet(StringComparer.Ordinal);
+        foreach (DataGridViewColumn column in _grid.Columns)
+        {
+            // 돋보기·트리열림 같은 기능 버튼 칸은 숨기지 않는다.
+            if (!IsHideableColumn(column)) continue;
+            column.Visible = !hidden.Contains(column.Name);
+        }
+    }
+
+    /// <summary>사용자가 켜고 끌 수 있는 칸인지. 이름과 제목이 있는 자료 칸만 대상이다.</summary>
+    private static bool IsHideableColumn(DataGridViewColumn column) =>
+        column.Name is not ("Duplicates" or "Expand") &&
+        !string.IsNullOrWhiteSpace(column.HeaderText);
+
+    /// <summary>항목설정 창을 열어 표시할 칸을 고르게 한다.</summary>
+    private void OpenColumnSettings()
+    {
+        var columns = _grid.Columns.Cast<DataGridViewColumn>()
+            .Where(IsHideableColumn)
+            .OrderBy(column => column.DisplayIndex)
+            .Select(column => (column.Name, column.HeaderText, column.Visible))
+            .ToList();
+        if (columns.Count == 0) return;
+
+        using var dialog = new ColumnVisibilityForm(columns);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+
+        foreach (var (name, visible) in dialog.Result)
+        {
+            if (_grid.Columns[name] is { } column && IsHideableColumn(column)) column.Visible = visible;
+        }
+        ApplyColumnOrder(dialog.Order);
+
+        _settings.HiddenGridColumns = dialog.Result
+            .Where(item => !item.Value)
+            .Select(item => item.Key)
+            .ToList();
+        _store.SaveSettings(_settings);
+        SaveGridColumnOrder();
+        SetStatus($"항목설정을 저장했습니다 · 표시 {dialog.Result.Count(item => item.Value)}개");
+    }
+
+    /// <summary>
+    /// 항목설정 창에서 정한 순서를 목록에 적용한다.
+    /// 창에 없던 칸(돋보기·트리열림)은 원래 자리를 지키도록 앞쪽에 그대로 둔다.
+    /// </summary>
+    private void ApplyColumnOrder(IReadOnlyList<string> order)
+    {
+        if (order.Count == 0) return;
+
+        _applyingColumnOrder = true;
+        try
+        {
+            // 창에 나오지 않는 칸들이 먼저 오고, 그 뒤에 사용자가 정한 순서대로 놓는다.
+            var displayIndex = _grid.Columns.Cast<DataGridViewColumn>()
+                .Count(column => !IsHideableColumn(column));
+            foreach (var name in order)
+            {
+                if (_grid.Columns[name] is not { } column || !IsHideableColumn(column)) continue;
+                column.DisplayIndex = displayIndex++;
+            }
         }
         finally
         {
@@ -778,6 +887,7 @@ public sealed class MainForm : Form
         _retryFailedRankingsButton.Click += async (_, _) => await RetryFailedRankingsAsync();
         _advertisementAnalysisButton.Click += (_, _) => ShowOwnedComplexListPopup();
         _dongHoButton.Click += async (_, _) => await LoadDongHoAsync();
+        _columnSettingsButton.Click += (_, _) => OpenColumnSettings();
         _accountSettingsButton.Click += (_, _) => OpenAccountSettings();
         _settingsButton.Click += (_, _) => OpenSettings();
         _logoutButton.Click += (_, _) => Logout();
@@ -1328,8 +1438,6 @@ public sealed class MainForm : Form
         }
         finally
         {
-            // 문제가 있었을 때만 기록을 남긴다. 잘 끝나면 지난 기록도 지운다.
-            CpLoginTrace.Stop(_dongHoHadFailure);
             _refreshing = false;
             EndCancellableOperation();
             SetBusy(false);
@@ -2020,6 +2128,8 @@ public sealed class MainForm : Form
         }
         finally
         {
+            // 문제가 있었을 때만 기록을 남긴다. 잘 끝나면 지난 기록도 지운다.
+            CpLoginTrace.Stop(_dongHoHadFailure);
             _refreshing = false;
             EndCancellableOperation();
             SetBusy(false);
@@ -2035,12 +2145,11 @@ public sealed class MainForm : Form
     {
         if (_ownListings.Count == 0) return;
 
-        // 아직 값이 없고, 동·호를 가질 수 있는 매물만 묻는다.
-        // '조회했음' 표시가 아니라 값의 유무로 판단해야 지난번에 실패한 매물을 다시 시도할 수 있다.
+        // 동·호 중 하나라도 비어 있으면 다시 묻는다.
+        // '조회했음' 표시가 아니라 값의 유무로 판단해야 지난번에 못 채운 매물을 다시 시도할 수 있다.
         var pending = _ownListings
             .Select((listing, index) => (listing, index))
-            .Where(item => string.IsNullOrWhiteSpace(item.listing.Dong) &&
-                           string.IsNullOrWhiteSpace(item.listing.Ho) &&
+            .Where(item => !IsDongHoComplete(item.listing) &&
                            !string.IsNullOrWhiteSpace(item.listing.ArticleNo) &&
                            DongHoParser.SupportsDongHo(PropertyTypeDisplay(item.listing)))
             .ToList();
@@ -2050,7 +2159,6 @@ public sealed class MainForm : Form
             return;
         }
 
-        // 저장된 순서대로 CP를 돌면서, 값이 나온 매물은 다음 CP에 다시 묻지 않는다.
         var accounts = _cpAccountStore.Load()
             .Where(item => DongHoLookupFactory.Supports(item.CpValue) && item.Password.Length > 0)
             .ToList();
@@ -2061,7 +2169,10 @@ public sealed class MainForm : Form
         }
 
         var total = pending.Count;
-        var found = new Dictionary<int, DongHo>();
+        // 이미 갖고 있는 값에서 출발해 CP를 돌며 빈 자리만 채워 나간다.
+        var merged = pending.ToDictionary(
+            item => item.index,
+            item => new DongHo(item.listing.Dong ?? string.Empty, item.listing.Ho ?? string.Empty));
         var failures = new List<string>();
         var perCp = new List<string>();
         var remaining = pending;
@@ -2083,29 +2194,42 @@ public sealed class MainForm : Form
             }
 
             var asked = remaining.Count;
-            var results = await LookupDongHoAsync(client, remaining, found.Count, total);
-            var hits = 0;
+            var completedSoFar = merged.Count(entry => IsComplete(entry.Value));
+            var results = await LookupDongHoAsync(client, remaining, completedSoFar, total);
+
+            var filled = 0;
             foreach (var (index, value) in results)
             {
                 if (!value.HasValue) continue;
-                found[index] = value;
-                hits++;
+                var before = merged[index];
+                var after = Fill(before, value);
+                if (after == before) continue;
+                merged[index] = after;
+                filled++;
             }
             // CP별 성적을 남긴다. 로그인은 됐는데 한 건도 못 찾는 경우를 구분하기 위해서다.
-            perCp.Add($"{client.CpName} {hits}/{asked}건");
+            perCp.Add($"{client.CpName} {filled}/{asked}건");
 
-            remaining = remaining.Where(item => !found.ContainsKey(item.index)).ToList();
+            // 동·호가 모두 찬 매물만 뺀다. 한쪽만 찬 매물은 다음 CP에 계속 물어본다.
+            remaining = remaining.Where(item => !IsComplete(merged[item.index])).ToList();
         }
 
+        var completed = 0;
+        var partial = 0;
         foreach (var (_, index) in pending)
         {
-            if (index >= _ownListings.Count || !found.TryGetValue(index, out var value)) continue;
+            if (index >= _ownListings.Count) continue;
+            var value = merged[index];
+            if (!value.HasValue) continue;
+
             _ownListings[index] = _ownListings[index] with
             {
                 Dong = value.Dong,
                 Ho = value.Ho,
                 DongHoChecked = true
             };
+            if (IsComplete(value)) completed++;
+            else partial++;
         }
 
         RefreshRankingOwnListingDetails();
@@ -2113,13 +2237,27 @@ public sealed class MainForm : Form
         UpdateCurrentPageResults("랭킹 미조회");
         RenderGrid();
 
-        _dongHoHadFailure = failures.Count > 0;
+        // 실패했거나 한 건도 채우지 못했으면 기록을 남긴다. 원인을 봐야 하기 때문이다.
+        _dongHoHadFailure = failures.Count > 0 || completed + partial == 0;
         var detail = perCp.Count == 0 ? string.Empty : $" ({string.Join(", ", perCp)})";
+        var partialNotice = partial == 0 ? string.Empty : $" · 일부만 확인 {partial}건";
         var notice = failures.Count == 0
             ? string.Empty
             : $" · 실패: {string.Join(" / ", failures)} · 기록: {CpLoginTrace.FilePath}";
-        SetStatus($"동·호 확인 완료 · {found.Count}/{total}건 반영{detail}{notice}");
+        SetStatus($"동·호 확인 완료 · {completed}/{total}건 완성{partialNotice}{detail}{notice}");
     }
+
+    /// <summary>동·호가 모두 채워졌는지. 둘 다 있어야 더 묻지 않는다.</summary>
+    private static bool IsComplete(DongHo value) =>
+        value.Dong.Length > 0 && value.Ho.Length > 0;
+
+    private static bool IsDongHoComplete(Listing listing) =>
+        !string.IsNullOrWhiteSpace(listing.Dong) && !string.IsNullOrWhiteSpace(listing.Ho);
+
+    /// <summary>이미 있는 값은 그대로 두고 빈 자리만 새 값으로 채운다.</summary>
+    private static DongHo Fill(DongHo current, DongHo incoming) =>
+        new(current.Dong.Length > 0 ? current.Dong : incoming.Dong,
+            current.Ho.Length > 0 ? current.Ho : incoming.Ho);
 
     /// <summary>CP 한 곳에 남은 매물을 병렬로 물어본다.</summary>
     private async Task<List<(int Index, DongHo Value)>> LookupDongHoAsync(
@@ -2827,8 +2965,9 @@ public sealed class MainForm : Form
 
         var articleNo = tag.Listing.ArticleNo;
         var groupId = FirstNotEmpty(_loadedListingGroupId, _groupId.Text.Trim(), _settings.GroupId);
+        // 동일매물 창은 하나만 띄운다. 다른 매물의 돋보기를 눌러도 같은 창의 내용을 바꿔 보여 준다.
         ShowDataPopup(
-            articleNo,
+            SingleWindowKey,
             () => new DuplicateListingForm(
                 tag.Result,
                 groupId,
@@ -2951,6 +3090,9 @@ public sealed class MainForm : Form
     /// 다른 매물이면 별도 창으로 계속 생성해 여러 매물을 나란히 비교할 수 있다.
     /// 광고분석처럼 매물 단위가 아닌 팝업은 고정 키를 써서 항상 한 창만 유지한다.
     /// </summary>
+    /// <summary>매물마다 창을 만들지 않고 한 창만 쓰는 팝업의 키.</summary>
+    private const string SingleWindowKey = "single";
+
     private TPopup ShowDataPopup<TPopup>(
         string articleNo,
         Func<TPopup> create,
@@ -3015,8 +3157,14 @@ public sealed class MainForm : Form
             if (!popup.Visible) popup.Show();
             if (popup.WindowState == FormWindowState.Minimized)
                 popup.WindowState = FormWindowState.Normal;
+
             popup.BringToFront();
+            // 다른 창이 앞에 있으면 Activate만으로는 올라오지 않는다.
+            // 잠깐 맨 위로 올려 확실히 앞에 세운 뒤 고정을 푼다.
+            // 고정을 풀어야 이후 사용자가 고른 다른 창이 이 창 앞으로 올 수 있다.
+            popup.TopMost = true;
             popup.Activate();
+            popup.TopMost = false;
             popup.Focus();
         });
     }
@@ -3651,8 +3799,7 @@ public sealed class MainForm : Form
             e.Cancel = true;
             SetStatus("현재 조회는 시스템 트레이 백그라운드에서 계속됩니다.");
             _busyOverlay.Hide();
-            Hide();
-            ShowInTaskbar = false;
+            HideToTray();
             ShowBackgroundTip("현재 랭킹 조회를 백그라운드에서 계속합니다.");
             return;
         }
@@ -3660,15 +3807,25 @@ public sealed class MainForm : Form
         _settings.RankImmediatelyAfterListingLoad = true;
         _settings.DisplayPageSize = 0;
         _store.SaveSettings(_settings);
-        Hide();
-        ShowInTaskbar = false;
+        HideToTray();
         ShowBackgroundTip("랭킹 모니터가 시스템 트레이에서 계속 실행됩니다.");
+    }
+
+    /// <summary>
+    /// 창을 숨겨 트레이로 내린다.
+    /// 숨긴 창은 작업표시줄에 남지 않으므로 ShowInTaskbar는 건드리지 않는다.
+    /// 보이는 창에서 그 값을 바꾸면 창 핸들이 다시 만들어져 화면이 깜빡이고
+    /// 닫기 버튼을 한 번 더 눌러야 하는 문제가 생긴다.
+    /// </summary>
+    private void HideToTray()
+    {
+        // 최대화 상태로 내렸다면 다시 열 때도 최대화로 돌려준다.
+        if (WindowState != FormWindowState.Minimized) _restoreWindowState = WindowState;
+        Hide();
     }
 
     private void ShowBackgroundTip(string message)
     {
-        if (_hideTipShown) return;
-        _hideTipShown = true;
         _trayIcon.BalloonTipTitle = "백그라운드에서 실행 중";
         _trayIcon.BalloonTipText = message;
         _trayIcon.BalloonTipIcon = ToolTipIcon.Info;
@@ -3681,7 +3838,10 @@ public sealed class MainForm : Form
         Enabled = true;
         ShowInTaskbar = true;
         Show();
-        WindowState = FormWindowState.Normal;
+        // 최대화해 두었다면 최대화로, 아니면 보통 크기로 되돌린다.
+        WindowState = _restoreWindowState == FormWindowState.Maximized
+            ? FormWindowState.Maximized
+            : FormWindowState.Normal;
         Activate();
     }
 

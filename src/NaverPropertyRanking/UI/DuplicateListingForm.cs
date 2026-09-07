@@ -102,6 +102,9 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
             "더블 클릭하면 네이버 부동산에서 매물을 엽니다.");
         AddColumn("PropertyType", "매물유형", 90, DataGridViewContentAlignment.MiddleCenter);
         AddColumn("ComplexName", "단지명", 150, DataGridViewContentAlignment.MiddleLeft);
+        AddColumn("Address", "상세주소", 220, DataGridViewContentAlignment.MiddleLeft);
+        AddColumn("Dong", "동", 70, DataGridViewContentAlignment.MiddleCenter);
+        AddColumn("Ho", "호", 70, DataGridViewContentAlignment.MiddleCenter);
         AddColumn("Trade", "거래유형", 80, DataGridViewContentAlignment.MiddleCenter);
         AddColumn("Price", "거래금액", 120, DataGridViewContentAlignment.MiddleLeft);
         AddColumn("RegisteredDate", "등록일", 90, DataGridViewContentAlignment.MiddleCenter);
@@ -142,17 +145,28 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
     {
         _grid.Rows.Clear();
         var ownArticleNo = _result.OwnListing.ArticleNo;
-        for (var index = 0; index < _result.Comparables.Count; index++)
+
+        // 노출순위 1위부터 그대로 늘어놓는다.
+        // 선택한 내 매물은 맨 위에 따로 두지 않고, 목록 안의 제 순위 자리에만 나온다.
+        // 1위가 맨 위 줄이므로 딸린 표시를 붙이지 않고, 2위부터 트리 모양으로 보여 준다.
+        var rows = _result.Comparables
+            .Select((listing, index) => (Listing: listing, ExposureRank: (int?)(index + 1), IsParent: index == 0))
+            .ToList();
+
+        foreach (var (listing, exposureRank, isParent) in rows)
         {
-            var listing = _result.Comparables[index];
             var isMine = listing.IsMine ||
                          string.Equals(listing.ArticleNo, ownArticleNo, StringComparison.Ordinal);
             var rowIndex = _grid.Rows.Add(
-                $"{index + 1}위",
+                exposureRank is { } position ? $"{position}위" : "-",
                 isMine ? "내 매물" : "동일매물",
-                listing.ArticleNo,
+                // 맨 위(1위)는 그대로 두고 그 아래부터 딸린 표시를 붙인다.
+                isParent ? listing.ArticleNo : $"└ {listing.ArticleNo}",
                 DisplayOrDash(listing.RealEstateType),
                 DisplayOrDash(listing.ArticleName),
+                DisplayOrDash(listing.Address),
+                DisplayOrDash(listing.Dong),
+                DisplayOrDash(listing.Ho),
                 listing.TradeType,
                 listing.Price,
                 RegistrationDateDisplay(listing.RegisteredDate),
@@ -163,9 +177,11 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
             var row = _grid.Rows[rowIndex];
             if (isMine)
             {
-                // 본 화면 매물 목록의 내 매물 행과 같은 연초록 배경·볼드로 통일한다.
-                row.DefaultCellStyle.BackColor = Color.FromArgb(244, 250, 247);
+                // 본 화면에서 트리를 펼쳤을 때 내 매물 행에 쓰는 색과 같게 맞춘다.
+                row.DefaultCellStyle.BackColor = Color.FromArgb(232, 247, 239);
+                row.DefaultCellStyle.ForeColor = Color.FromArgb(0, 105, 62);
                 row.DefaultCellStyle.SelectionBackColor = Color.FromArgb(221, 242, 233);
+                row.DefaultCellStyle.SelectionForeColor = Color.FromArgb(0, 105, 62);
                 row.DefaultCellStyle.Font = BoldFont();
             }
             else if (_groupId.Length > 0 &&
@@ -182,6 +198,11 @@ public sealed class DuplicateListingForm : Form, IReloadablePopup
             : $" · 가격 {_result.SameAddressMinPrice} ~ {_result.SameAddressMaxPrice}";
         _status.Text = $"내 매물 {ownArticleNo} · 현재순위 " +
                        $"{(_result.Rank is { } rank ? rank + "위" : "-")} / 동일매물 {_result.Comparables.Count}건{priceRange}";
+
+        // 목록을 채우면 첫 행이 저절로 선택되어 배경색이 칠해진다.
+        // 내 매물 표시와 헷갈리므로 선택을 풀어 둔다.
+        _grid.ClearSelection();
+        if (_grid.Rows.Count > 0) _grid.CurrentCell = null;
     }
 
     /// <summary>

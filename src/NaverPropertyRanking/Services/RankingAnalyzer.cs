@@ -19,16 +19,25 @@ public static class RankingAnalyzer
         var events = new List<NotificationEvent>();
         var listingName = BuildListingInformation(current.OwnListing);
         var tradeSummary = JoinDistinct(" ", current.OwnListing.TradeType, current.OwnListing.Price);
+        // 어떤 알림이든 어느 집인지 바로 알아볼 수 있게 동·호와 검증방식을 함께 넘긴다.
+        var verificationType = VerificationTypeFormatter.Format(current.OwnListing.VerificationTypeCode);
+        var dong = current.OwnListing.Dong;
+        var ho = current.OwnListing.Ho;
 
         if (settings.NotifyEveryRankChange && previous.Rank != current.Rank)
         {
+            // 순위만으로는 왜 밀렸는지 알기 어려워 홍보방식을 함께 넘긴다.
+            // 문구에 섞지 않고 따로 두어 팝업에서 별도 칸으로 보여 준다.
             events.Add(new NotificationEvent(
                 "매물 랭킹 변경",
                 $"{FormatRank(previous.Rank)} → {FormatRank(current.Rank)}",
                 current.OwnListing.ArticleNo,
                 listingName,
                 tradeSummary,
-                GetRankHighlight(previous.Rank, current.Rank)));
+                GetRankHighlight(previous.Rank, current.Rank),
+                verificationType,
+                dong,
+                ho));
         }
 
         var crossedThreshold = current.Rank is not null
@@ -42,7 +51,10 @@ public static class RankingAnalyzer
                 current.OwnListing.ArticleNo,
                 listingName,
                 tradeSummary,
-                NotificationHighlight.Warning));
+                NotificationHighlight.Warning,
+                verificationType,
+                dong,
+                ho));
         }
 
         if (settings.NotifyCompetitorPriceChange)
@@ -57,7 +69,10 @@ public static class RankingAnalyzer
                     current.OwnListing.ArticleNo,
                     listingName,
                     tradeSummary,
-                    NotificationHighlight.PriceChange));
+                    NotificationHighlight.PriceChange,
+                verificationType,
+                dong,
+                ho));
             }
         }
 
@@ -69,7 +84,10 @@ public static class RankingAnalyzer
                 current.OwnListing.ArticleNo,
                 listingName,
                 tradeSummary,
-                NotificationHighlight.NewDuplicate));
+                NotificationHighlight.NewDuplicate,
+                verificationType,
+                dong,
+                ho));
         }
 
         return (snapshot, events);

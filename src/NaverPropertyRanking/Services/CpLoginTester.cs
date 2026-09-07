@@ -55,6 +55,9 @@ public static class CpLoginTester
         if (!site.CanTestLogin)
             return CpLoginTestResult.Fail(
                 $"{site.Name}은(는) 접속 주소가 아직 등록되지 않아 접속 테스트를 할 수 없습니다. 계정 저장은 됩니다.");
+        if (site.RequiresSiteKey && account.LoginUrl.Length == 0)
+            return CpLoginTestResult.Fail(
+                $"{site.Name}은(는) 계정마다 주소가 달라 {site.SiteKeyLabel}를 함께 입력해야 합니다.");
 
         var cookies = new CookieContainer();
         handler ??= new HttpClientHandler
@@ -93,13 +96,17 @@ public static class CpLoginTester
                 case "1": return await TestRfineAsync(client, site, account, cancellationToken);
                 case "2": return await TestNeonetAsync(client, site, account, cancellationToken);
                 case "3": return await TestAipartnerAsync(client, site, account, cancellationToken);
+                case "4": return await TestAsilAsync(client, account, cancellationToken);
+                // 선방·우리집부동산은 같은 매물관리센터 화면이라 처리가 같다.
+                case "5":
+                case "6": return await TestMemulCenterAsync(client, account, cancellationToken);
             }
 
-            using var pageResponse = await client.GetAsync(site.LoginUrl, cancellationToken);
+            using var pageResponse = await client.GetAsync(account.LoginUrl, cancellationToken);
             if (!pageResponse.IsSuccessStatusCode)
                 return CpLoginTestResult.Fail($"로그인 페이지를 열지 못했습니다(HTTP {(int)pageResponse.StatusCode}).");
 
-            var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(site.LoginUrl);
+            var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(account.LoginUrl);
             var html = await ReadBodyAsync(pageResponse, cancellationToken);
             var form = FindLoginForm(html);
             if (form is null)
@@ -143,11 +150,11 @@ public static class CpLoginTester
         CpAccount account,
         CancellationToken cancellationToken)
     {
-        using var pageResponse = await client.GetAsync(site.LoginUrl, cancellationToken);
+        using var pageResponse = await client.GetAsync(account.LoginUrl, cancellationToken);
         if (!pageResponse.IsSuccessStatusCode)
             return CpLoginTestResult.Fail($"로그인 페이지를 열지 못했습니다(HTTP {(int)pageResponse.StatusCode}).");
 
-        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(site.LoginUrl);
+        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(account.LoginUrl);
         var html = await ReadBodyAsync(pageResponse, cancellationToken);
         var csrfToken = ReadCsrfToken(html);
         if (csrfToken is null)
@@ -185,11 +192,11 @@ public static class CpLoginTester
         CpAccount account,
         CancellationToken cancellationToken)
     {
-        using var pageResponse = await client.GetAsync(site.LoginUrl, cancellationToken);
+        using var pageResponse = await client.GetAsync(account.LoginUrl, cancellationToken);
         if (!pageResponse.IsSuccessStatusCode)
             return CpLoginTestResult.Fail($"로그인 페이지를 열지 못했습니다(HTTP {(int)pageResponse.StatusCode}).");
 
-        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(site.LoginUrl);
+        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(account.LoginUrl);
         var actionUrl = new Uri(loginPageUrl, "/novo-rebank/view/login/ptl.login_after.usr.neo");
         using var content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
@@ -234,6 +241,111 @@ public static class CpLoginTester
     }
 
     /// <summary>
+    /// 매물관리센터 계열(선방·우리집부동산) 로그인.
+    /// 폼의 action을 스크립트가 정하므로 그 주소로 바로 보낸다.
+    /// 응답은 안내창을 띄우는 스크립트 한 줄이라 alert 문구로 판정한다.
+    /// </summary>
+    private static async Task<CpLoginTestResult> TestMemulCenterAsync(
+        HttpClient client,
+        CpAccount account,
+        CancellationToken cancellationToken)
+    {
+        using var pageResponse = await client.GetAsync(account.LoginUrl, cancellationToken);
+        if (!pageResponse.IsSuccessStatusCode)
+            return CpLoginTestResult.Fail($"로그인 페이지를 열지 못했습니다(HTTP {(int)pageResponse.StatusCode}).");
+
+        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(account.LoginUrl);
+        // 로그인 화면과 같은 폴더의 loginrun.asp로 보낸다.
+        var actionUrl = new Uri(loginPageUrl, "loginrun.asp");
+        using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["userid"] = account.UserId,
+            ["userpw"] = account.Password,
+            ["id_cookie_save"] = "N"
+        });
+        using var request = new HttpRequestMessage(HttpMethod.Post, actionUrl) { Content = content };
+        request.Headers.Referrer = loginPageUrl;
+        using var loginResponse = await client.SendAsync(request, cancellationToken);
+        if (!loginResponse.IsSuccessStatusCode)
+            return CpLoginTestResult.Fail($"로그인 요청이 거부되었습니다(HTTP {(int)loginResponse.StatusCode}).");
+
+        var body = await ReadBodyAsync(loginResponse, cancellationToken);
+        return ReadMemulCenterResult(body);
+    }
+
+    /// <summary>매물관리센터 응답을 읽는다. 실패하면 안내창을 띄우고 이전 화면으로 되돌린다.</summary>
+    public static CpLoginTestResult ReadMemulCenterResult(string body)
+    {
+        var alert = Regex.Match(body ?? string.Empty, @"alert\(\s*[""'](?<message>[^""']*)[""']",
+            RegexOptions.IgnoreCase);
+        if (!alert.Success) return CpLoginTestResult.Ok("로그인에 성공했습니다.");
+
+        var message = CleanAlertMessage(alert.Groups["message"].Value);
+        return CpLoginTestResult.Fail(
+            message.Length > 0 ? message : "아이디 또는 비밀번호가 올바르지 않습니다.");
+    }
+
+    /// <summary>
+    /// 아실 전용 로그인.
+    /// 계정마다 주소가 다르고 아이디 입력란이 없다. 그 주소가 곧 계정이라 비밀번호만 보낸다.
+    /// 응답은 화면을 옮기는 스크립트 한 줄이라, 로그인 화면으로 되돌리는지로 판정한다.
+    /// </summary>
+    private static async Task<CpLoginTestResult> TestAsilAsync(
+        HttpClient client,
+        CpAccount account,
+        CancellationToken cancellationToken)
+    {
+        using var pageResponse = await client.GetAsync(account.LoginUrl, cancellationToken);
+        if (!pageResponse.IsSuccessStatusCode)
+            return CpLoginTestResult.Fail($"로그인 페이지를 열지 못했습니다(HTTP {(int)pageResponse.StatusCode}).");
+
+        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(account.LoginUrl);
+        var actionUrl = new Uri(loginPageUrl, "loginProcess.jsp");
+        using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["p"] = account.Password
+        });
+        using var request = new HttpRequestMessage(HttpMethod.Post, actionUrl) { Content = content };
+        request.Headers.Referrer = loginPageUrl;
+        using var loginResponse = await client.SendAsync(request, cancellationToken);
+        if (!loginResponse.IsSuccessStatusCode)
+            return CpLoginTestResult.Fail($"로그인 요청이 거부되었습니다(HTTP {(int)loginResponse.StatusCode}).");
+
+        var body = await ReadBodyAsync(loginResponse, cancellationToken);
+        return ReadAsilResult(body);
+    }
+
+    /// <summary>
+    /// 안내창 문구를 한 줄로 다듬는다.
+    /// 사이트가 줄바꿈을 실제 줄바꿈이 아니라 역슬래시+n 두 글자로 적어 보낸다.
+    /// </summary>
+    private static string CleanAlertMessage(string message)
+    {
+        var text = Regex.Replace(message ?? string.Empty, @"\\[rnt]", " ");
+        return Regex.Replace(text, @"\s+", " ").Trim();
+    }
+
+    /// <summary>아실 응답을 읽는다. 실패하면 안내창을 띄우고 로그인 화면으로 되돌린다.</summary>
+    public static CpLoginTestResult ReadAsilResult(string body)
+    {
+        var text = body ?? string.Empty;
+        var backToLogin = text.Contains("login.jsp", StringComparison.OrdinalIgnoreCase);
+        var alert = Regex.Match(text, @"alert\(\s*'(?<message>[^']*)'", RegexOptions.IgnoreCase);
+
+        if (!backToLogin && !alert.Success)
+            return CpLoginTestResult.Ok("로그인에 성공했습니다.");
+
+        if (alert.Success)
+        {
+            // 안내 문구의 첫 줄만 쓴다. 뒤쪽은 고객센터 번호 안내라 길기만 하다.
+            // 뒤쪽 고객센터 안내는 길기만 해서 첫 문장만 남긴다.
+            var message = CleanAlertMessage(alert.Groups["message"].Value).Split('(')[0].Trim();
+            if (message.Length > 0) return CpLoginTestResult.Fail(message);
+        }
+        return CpLoginTestResult.Fail("아이디 또는 비밀번호가 올바르지 않습니다.");
+    }
+
+    /// <summary>
     /// 이실장 전용 로그인.
     /// 사이트가 아이디 형태에 따라 두 갈래로 나뉘므로 같은 갈래를 그대로 따라간다.
     ///  - 휴대폰번호 아이디(기존 회원): loginStore에 그대로 보낸다.
@@ -245,11 +357,11 @@ public static class CpLoginTester
         CpAccount account,
         CancellationToken cancellationToken)
     {
-        using var pageResponse = await client.GetAsync(site.LoginUrl, cancellationToken);
+        using var pageResponse = await client.GetAsync(account.LoginUrl, cancellationToken);
         if (!pageResponse.IsSuccessStatusCode)
             return CpLoginTestResult.Fail($"로그인 페이지를 열지 못했습니다(HTTP {(int)pageResponse.StatusCode}).");
 
-        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(site.LoginUrl);
+        var loginPageUrl = pageResponse.RequestMessage?.RequestUri ?? new Uri(account.LoginUrl);
         var html = await ReadBodyAsync(pageResponse, cancellationToken);
 
         var csrfToken = ReadMetaCsrfToken(html);
@@ -825,22 +937,23 @@ public static class CpLoginTester
 
     /// <summary>
     /// 응답 본문을 문자열로 읽는다.
-    /// EUC-KR처럼 .NET이 기본으로 모르는 인코딩을 쓰는 사이트가 있어 그대로 읽으면 예외가 난다.
-    /// 그럴 때는 바이트를 Latin-1로 옮긴다. 판정에 쓰는 주소·코드는 모두 ASCII라 영향이 없다.
+    /// 사이트마다 문자집합이 달라(EUC-KR·UTF-8) 응답 헤더가 알려 주는 값으로 해석한다.
+    /// 그러지 않으면 안내 문구의 한글이 깨져 사용자에게 그대로 보인다.
     /// </summary>
     private static async Task<string> ReadBodyAsync(
         HttpResponseMessage response,
         CancellationToken cancellationToken)
     {
-        try
+        var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+        var charset = response.Content.Headers.ContentType?.CharSet?.Trim('"', '\'');
+
+        // 사이트가 알려 준 문자집합을 그대로 쓴다. EUC-KR로 보내는 CP가 있다.
+        if (!string.IsNullOrWhiteSpace(charset))
         {
-            return await response.Content.ReadAsStringAsync(cancellationToken);
+            try { return System.Text.Encoding.GetEncoding(charset).GetString(bytes); }
+            catch (ArgumentException) { /* 모르는 이름이면 아래 기본값으로 넘어간다. */ }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or NotSupportedException)
-        {
-            var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
-            return System.Text.Encoding.Latin1.GetString(bytes);
-        }
+        return System.Text.Encoding.UTF8.GetString(bytes);
     }
 
     private static string? ReadCsrfToken(string html)

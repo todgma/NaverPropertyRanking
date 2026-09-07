@@ -21,6 +21,8 @@ public sealed class AppSettings
     public bool NotifyNewDuplicate { get; set; } = true;
     public bool PopupNotificationsEnabled { get; set; }
     public List<string> GridColumnOrder { get; set; } = [];
+    /// <summary>매물목록에서 숨긴 항목 이름. 목록에 없는 항목은 모두 보인다.</summary>
+    public List<string> HiddenGridColumns { get; set; } = [];
 
     public bool SaveCredentials { get; set; }
     public string EncryptedBearerToken { get; set; } = string.Empty;
